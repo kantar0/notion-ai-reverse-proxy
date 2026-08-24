@@ -1,0 +1,14 @@
+{
+  "name": "mcp-pc-control",
+  "version": "0.9.0",
+  "private": true,
+  "type": "module",
+  "description": "Servidor MCP local limitado y compatible con Notion via Streamable HTTP",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "latest",
+    "express": "^4.21.2"
+  }
+}
