@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+
+# Logs & temporary files
+*.log
+*.png
+debug_page.png
+after_submit.png
+hcaptcha_clicked.png
+outlook_final_step.png
+outlook_signup_result.png
+notion_error.png
+notion_flow_error.png
+
+# Sensitive and State files
+tokens.json
+tokens.local.json
+active_thread.txt
+active_thread_3.txt
+outlook_accounts.json
+proxies.txt
+.env
+.env.local
