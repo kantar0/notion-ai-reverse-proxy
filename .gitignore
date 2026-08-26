@@ -23,3 +23,42 @@ outlook_accounts.json
 proxies.txt
 .env
 .env.local
+
+# --- Secrets and machine-local state (never commit) ---
+# MCP server
+config.json
+tunnel-domain.txt
+tunnel-public-url.txt
+ngrok-domain.txt
+ngrok-public-url.txt
+*ngrok-public-url*.txt
+.token
+
+# Notion AI CLI: these files are credentials
+cli-accounts.json
+cli-state.json
+cli.lock.json
+auth-capture.json
+account-sessions/
+headless-session.json
+direct-session.json
+captured-*.json
+browser-profile/
+headless-browser-profile/
+notion-popup-profiles/
+bridge-requests/
+bridge-responses/
+bridge-progress/
+terminal-memory.md
+terminal-thread.md
+
+# Logs, scratch output and backups
+*.log
+*.pid
+*.out
+*.out.txt
+last-output.txt
+*.bak
+*.backup-*
+*.disabled-*
+TASK_MEMORY.md

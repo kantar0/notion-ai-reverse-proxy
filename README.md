@@ -114,3 +114,43 @@ Esta versión del repo ya deja documentado un flujo completo para:
 - operar desde terminal con una arquitectura más clara y replicable
 
 Si quieres extenderlo, el siguiente paso natural es añadir ejemplos concretos de cliente (curl, Python, Node, Claude/Codex/Shosso) apuntando al proxy y al MCP al mismo tiempo.
+
+---
+
+## Guías nuevas: despliegue estable y setup desde cero
+
+Estas tres guías están escritas para que cualquier persona (o cualquier IA) monte
+el stack en **su propia máquina, con sus propios datos**. No contienen tokens,
+dominios, cuentas ni rutas de nadie: todo son placeholders del tipo
+`<PROJECT_DIR>`, `<PORT>`, `<TOKEN>`, `<TUNNEL_DOMAIN>`.
+
+- `docs/AI_AGENT_SETUP.md` → **empieza por aquí si eres una IA.** Checklist de
+  despliegue paso a paso: qué valores pedirle al usuario, cómo generar el token,
+  cómo verificar cada capa y qué reglas no romper nunca.
+- `docs/MCP_TUNNEL_HARDENING.md` → cómo mantener un servidor MCP propio conectado
+  a Notion de forma permanente. Explica los cuatro modos de fallo reales
+  (watchdog que mata procesos sanos, VPN que rompe el health check por loopback,
+  túnel que parece accesible pero no lo es, y sesiones MCP que no sobreviven a un
+  reinicio) con la corrección de cada uno, más el supervisor de tres capas y cómo
+  fijar la URL pública para no tener que reconectar nunca más.
+- `docs/NOTION_AI_CLI_TERMINAL.md` → la terminal de Notion AI: arquitectura
+  (cliente ligero + daemon puente + cliente de Notion por CDP), formato de
+  `cli-accounts.json` y `cli-state.json`, arranque del stack, todos los comandos
+  disponibles, el subcomando de diagnóstico del MCP y una tabla de
+  troubleshooting con los errores que aparecen de verdad.
+
+### Requisito que bloquea todo el CLI
+
+La cuenta de Notion que use el CLI **necesita Notion AI habilitado en el
+workspace seleccionado**. Si no lo tiene, el composer nunca devuelve respuesta y
+todas las peticiones expiran sin error útil. Compruébalo a mano en la UI antes de
+configurar nada.
+
+### Regla de oro del watchdog
+
+No mates nunca un proceso que está vivo. Reinicia solo con evidencia dura de
+muerte: fallo continuado del health check durante un periodo de gracia largo,
+**más** un connect TCP fallido, **más** cero conexiones establecidas. Y jamás
+mates procesos de túnel por nombre de imagen: te llevas por delante el que está
+sirviendo el tráfico y, sin dominio reservado, la URL pública cambia y todos los
+clientes rompen.
