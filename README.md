@@ -154,3 +154,14 @@ muerte: fallo continuado del health check durante un periodo de gracia largo,
 mates procesos de túnel por nombre de imagen: te llevas por delante el que está
 sirviendo el tráfico y, sin dominio reservado, la URL pública cambia y todos los
 clientes rompen.
+
+
+---
+
+## Multi-workspace account synchronization and rotation
+
+A new implementation guide documents the browser-profile and workspace-rotation hardening used in the Shosso/Notion AI terminal workflow:
+
+- `docs/MULTI_WORKSPACE_ACCOUNT_ROTATION.md` → persistent account-capture profile, browser-first identity detection, one session per account/workspace pair, hidden-browser workspace injection, stale-thread recovery, availability-aware rotation, and static-ngrok verification against the real MCP port.
+
+The guide is generic and contains no credentials, personal identifiers, session cookies or machine-specific domains.
