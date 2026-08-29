@@ -59,6 +59,22 @@ const USER_SEL = '[data-agent-chat-user-step-id]'
 const COPY_LABELS = ['Copy response', 'Copiar respuesta']
 const COPY_SEL = COPY_LABELS.map(l => `[aria-label="${l}"]`).join(',')
 
+// Prompt del modo MCP: ahi Notion SI puede llamar a las herramientas, y todo
+// (razonar + herramientas + respuesta) ocurre en UN SOLO turno, que es lo que
+// gasta una sola respuesta del cupo. Nada de lineas EJECUTAR: eso parte la
+// conversacion en varias peticiones y multiplica el gasto.
+const PREFIJO_MCP = `MODO CLI SHOSSO. Respondes en una terminal: español, texto plano, breve.
+Tienes conectadas las herramientas de este PC (empiezan por sh_): sh_run_command, sh_list_files,
+sh_read_text_file, sh_write_text_file, sh_search_files, sh_start_background_command y las demás.
+ÚSALAS TÚ MISMO para resolver lo que te pidan, en este mismo turno, y luego contesta con el
+resultado. Encadena las que hagan falta sin pedir permiso ni preguntar antes.
+sh_run_command acepta cualquier comando de Windows: 'start <programa>' abre, 'taskkill /IM <exe> /F'
+cierra, y con powershell -NoProfile -Command puedes consultar lo que sea del equipo (ventanas y sus
+títulos, procesos, discos, red, servicios). Si algo no sale, prueba otra vía antes de rendirte.
+No escribas líneas EJECUTAR: aquí las herramientas las llamas tú.
+No crees páginas ni artefactos de Notion salvo que te lo pidan.
+Rutas relativas a la carpeta del usuario ('~/Desktop').`
+
 const BASE_PREFIX = `Eres un TRADUCTOR de peticiones a comandos de Windows.
 NO ejecutas nada ni controlas ningún equipo: solo escribes la línea de comando que resolvería la petición.
 Un programa externo la ejecuta después y te devuelve el RESULTADO; tú solo traduces.
@@ -969,7 +985,7 @@ function buildScopedPrompt(userText, reqId) {
   const memory=readLocalMemory().trim().slice(0,4000)
   const transcript=readRecentTranscript(3000).trim()
   return [
-    BASE_PREFIX,'',
+    puenteActivo()?BASE_PREFIX:PREFIJO_MCP,'',
     '=== INICIO DE CONTEXTO DE SESIÓN CLI ===',' ',
     'PROYECTO ACTIVO:',state.activeProject||'(sin proyecto activo)',
     'CARPETA DE TRABAJO:',state.activeCwd||DIR,'',
@@ -2151,7 +2167,22 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
     // Solo se descartan los indicadores (palabra duplicada) y el vacío: exigir
     // 3 caracteres tiraba respuestas legítimas y cortas como "4", "75" u "ok",
     // que se quedaban esperando hasta agotar el tiempo.
-    const esProgreso=t=>{const x=String(t||'').replace(/\s+/g,' ').trim();return !x||/^(\S+)( \1)+$/i.test(x)}
+    const esProgreso=t=>{
+      // Se colaba como respuesta el rotulo de progreso con adornos delante
+      // ("=== 4:32 AM Exploring Exploring Notion AI is generating a response"),
+      // asi que primero se quitan los adornos y la marca de hora.
+      let x=String(t||'').replace(/\s+/g,' ').trim()
+      x=x.replace(/^[\s=\]]+/,'').replace(/^\d{1,2}:\d{2}\s*(AM|PM|a\.?\s?m\.?|p\.?\s?m\.?)?\s*/i,'')
+      // Mientras genera, el rotulo esta SIEMPRE presente: es la senal fiable.
+      if(/is generating a response/i.test(x)) return true
+      x=x.replace(/Notion AI (is generating a response|finished)[.…]?/gi,'')
+      // Los rotulos cambian en cada version (Brewing, Discovering, Exploring...):
+      // en vez de listarlos, se descarta cualquier texto que sea una palabra
+      // repetida, que es la forma que tienen todos.
+      x=x.replace(/\b(\w+)( \1)+\b/gi,'')
+      x=x.replace(/[\s.·—-]+/g,' ').trim()
+      return !x
+    }
     // El texto del prompt NO es una respuesta: se colaba el contexto entero
     // ("=== FIN DE CONTEXTO", "SOLICITUD DEL USUARIO:", "[reqId:...]") y acababa
     // mostrandose al usuario como si Notion hubiera contestado eso.
@@ -2513,6 +2544,29 @@ function pidePc(texto){
   if(palabras.some(p=>CLAVES.some(k=>p.startsWith(k)))) return true
   // rutas escritas a mano: ~/algo, C:\\algo, ./algo
   return /~[/\\\\]|[a-z]:[/\\\\]|[.][/]/i.test(t)
+}
+function extraerOrdenes(texto){
+  // Todas las ordenes validas de UNA respuesta, en orden. Con un unico turno
+  // por peticion, encadenar varias acciones solo es posible asi.
+  const t=String(texto||'')
+  const fuera=[], vistas=new Set()
+  const re=/EJECUTAR\s*\{/gi
+  let m
+  while((m=re.exec(t))){
+    // La comprobacion de "linea de guia" necesita el texto ANTERIOR, asi que se
+    // mira aqui, sobre el original, antes de recortar el trozo.
+    const nl=t.lastIndexOf(String.fromCharCode(10),m.index)
+    if(/(->|→)\s*$/.test(t.slice(nl+1,m.index))) continue
+    // Solo HASTA la siguiente orden: si se le pasa el resto del texto,
+    // extraerOrden devuelve la ultima que encuentre y se pierden las de enmedio.
+    const sig=t.slice(m.index+1).search(/EJECUTAR\s*\{/i)
+    const o=extraerOrden(sig>=0?t.slice(m.index,m.index+1+sig):t.slice(m.index))
+    if(!o) continue
+    const huella=o.tool+' '+JSON.stringify(o.args)
+    if(vistas.has(huella)) continue
+    vistas.add(huella); fuera.push(o)
+  }
+  return fuera
 }
 function extraerOrden(texto){
   const t=String(texto||'')
@@ -3171,7 +3225,12 @@ async function processPrompt(userText, progress=()=>{}) {
     // encadene ordenes sin fin.
     for(let paso=1;paso<=5;paso++){
       if(yaRespondido) break          // el CLI ya resolvio: no duplicar la accion
-      const orden=extraerOrden(respuesta)
+      // Todas las ordenes de la respuesta, en el orden en que las escribio: la
+      // primera se ejecuta aqui y el resto se encadenan al presentar, que es
+      // como lo haria el MCP dentro de un solo turno.
+      const ordenes=extraerOrdenes(respuesta)
+      const orden=ordenes.length?ordenes[0]:null
+      const pendientes=ordenes.slice(1)
       if(!orden&&/EJECUTAR/i.test(String(respuesta||''))){
         // Escribio la linea pero sin comando de verdad (copio el hueco del
         // formato): se le pide la orden real en vez de darlo por perdido.
@@ -3233,14 +3292,33 @@ async function processPrompt(userText, progress=()=>{}) {
         }
       }catch{}
       ultimoResultado=recorte
+      // UN turno por peticion: la IA traduce y el CLI ejecuta y presenta. Pedirle
+      // ademas que redactara costaba OTRA respuesta del cupo, que en el plan Free
+      // es el recurso escaso. Con redactarConIA:true en cli-state vuelve a redactar.
+      if(!loadState().redactarConIA){
+        const restantes=(pendientes||[]).slice()
+        for(const extra of restantes){
+          const huella=extra.tool+' '+JSON.stringify(extra.args)
+          if(ordenesVistas.has(huella)) continue
+          ordenesVistas.add(huella)
+          log('[puente] encadeno '+extra.tool+' '+JSON.stringify(extra.args).slice(0,90))
+          const limpiosExtra={}
+          for(const [k,v] of Object.entries(extra.args||{})) limpiosExtra[k]=typeof v==='string'?v.normalize('NFKC'):v
+          let otra
+          try{ otra=await ejecutarOrden(extra.tool,limpiosExtra) }
+          catch(error){ otra={ok:false,texto:'fallo al ejecutar: '+error.message} }
+          recorte+=String.fromCharCode(10)+String(otra.texto||'').slice(0,2000)
+        }
+        progress('complete','Hecho',{tool:'Terminal',action:'Completado'})
+        const salidaFinal=String(recorte||'').trim()||'La orden se ejecutó, pero no devolvió salida.'
+        appendTranscript('IA [cli]',salidaFinal)
+        return salidaFinal
+      }
       try{
         respuesta=await runHiddenPromptWithRotation(
-        'RESULTADO de '+orden.tool+' ('+(salida.ok?'ok':'error')+'):\n'+recorte+
-        '\n\nResponde ya al usuario con esto. Su peticion era: '+userText,progress)
+        'RESULTADO de '+orden.tool+' ('+(salida.ok?'ok':'error')+'):'+String.fromCharCode(10)+recorte+
+        String.fromCharCode(10,10)+'Responde ya al usuario con esto. Su peticion era: '+userText,progress)
       }catch(e){
-        // La orden YA se ejecuto: si al ir a redactar se acaba el cupo, vale
-        // mucho mas entregar el dato en crudo que un error, que deja al usuario
-        // sin nada habiendo hecho ya el trabajo.
         log('[puente] sin poder redactar ('+String(e&&e.message||e).slice(0,80)+'); entrego el resultado tal cual')
         progress('complete','Hecho',{tool:'Terminal',action:'Completado'})
         const crudo=String(recorte||'').trim()

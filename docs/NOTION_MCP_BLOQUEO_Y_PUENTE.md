@@ -112,6 +112,29 @@ daemon debe nacer en la sesión interactiva del usuario.
 5 vueltas seguidas con `cmd /c start chrome`, 229 s). Las órdenes ya ejecutadas se
 memorizan por petición: si se repite una, se corta y se le exige la respuesta.
 
+## 3.bis Por qué el puente gasta más cupo, y qué hacer
+
+Con MCP, **una petición = una respuesta del cupo**: el razonamiento, las llamadas a herramientas y
+la contestación caben en un solo turno. El puente rompe eso en dos: una respuesta para traducir la
+petición a un comando y otra para redactar el resultado. En el plan Free, donde el cupo es el
+recurso escaso, eso es el doble de gasto por cada cosa que pidas.
+
+**No se puede simular el MCP desde fuera.** Inyectar el resultado de una herramienta *dentro* de un
+turno en curso es precisamente lo que hace ese canal; mientras Notion genera, no acepta ninguna
+entrada. No hay otra puerta.
+
+Lo que sí devuelve el gasto a una sola respuesta: **que el CLI presente el resultado**. La IA
+traduce (1 respuesta), el CLI ejecuta y muestra la salida, y no se gasta un segundo turno en
+redactarla. Para que una petición de varios pasos siga funcionando con un solo turno, se ejecutan
+**todas** las órdenes de esa respuesta, en el orden en que las escribió. Con `redactarConIA: true`
+en `cli-state.json` vuelve el modo de dos turnos.
+
+**Comprobado el 2026-08-29:** el error de "operation type" ya no aparece, pero **el MCP no está
+disponible en los workspaces del plan Free**: darlo de alta por API lo rechaza Notion
+(`Client saveTransactions request targets tables blocked by policy`), en los espacios que ya tenían
+módulos la IA contesta *"no puedo usar sh_run_command… no están disponibles aquí"*, y el chat no
+muestra ningún control de conectores. El MCP venía del trial de **Business**.
+
 ## 4. Consecuencia: el MCP deja de ser requisito
 
 Con el puente activo (`cli-state.mcpBridge !== false`, por defecto):
