@@ -2558,7 +2558,7 @@ function comandoDeApertura(comando){
   if(args) args=String(args).trim().replace(/^["']+|["']+$/g,'').trim()||null
   return prog?{prog,args}:null
 }
-function abrirLocal(objetivo,cwd,argumentos){
+function abrirLocal(objetivo,cwd,argumentos,reintentado){
   return new Promise(resolve=>{
     // Se COMPRUEBA que la ventana existe de verdad: dar por bueno el lanzamiento
     // hacia que el CLI dijera "listo, ya esta abierto" sin haber abierto nada
@@ -2603,6 +2603,17 @@ function abrirLocal(objetivo,cwd,argumentos){
       // Sin proceso visible: si era una URL o un documento pudo abrirse igual en
       // una ventana ya existente, asi que no se afirma que haya fallado.
       if(esUrl) return resolve({ok:true,texto:'abierto: '+objetivo})
+      // El nombre no estaba en el PATH ("start spotify" no abre nada porque
+      // Spotify no se registra ahi). La IA acerto con la intencion; el CLI se
+      // encarga de encontrar el programa y reintentar con su ruta real.
+      if(!reintentado&&!/[\/]/.test(String(objetivo))){
+        buscarPrograma(String(objetivo)).then(ruta=>{
+          if(!ruta) return resolve({ok:false,texto:'no encontré "'+objetivo+'" en este equipo'})
+          log('[pc] "'+objetivo+'" no estaba en el PATH; lo abro desde '+ruta)
+          resolve(abrirLocal(ruta,cwd,argumentos,true))
+        }).catch(()=>resolve({ok:false,texto:'no pude abrir '+objetivo}))
+        return
+      }
       resolve({ok:false,texto:'lancé '+objetivo+' pero no veo su ventana (¿se cerró enseguida?)'})
     })
   })
