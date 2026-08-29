@@ -2062,6 +2062,10 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
     // 3 caracteres tiraba respuestas legítimas y cortas como "4", "75" u "ok",
     // que se quedaban esperando hasta agotar el tiempo.
     const esProgreso=t=>{const x=String(t||'').replace(/\s+/g,' ').trim();return !x||/^(\S+)( \1)+$/i.test(x)}
+    // El texto del prompt NO es una respuesta: se colaba el contexto entero
+    // ("=== FIN DE CONTEXTO", "SOLICITUD DEL USUARIO:", "[reqId:...]") y acababa
+    // mostrandose al usuario como si Notion hubiera contestado eso.
+    const esContexto=t=>/FIN DE CONTEXTO|SOLICITUD DEL USUARIO|INICIO DE CONTEXTO|MODO CLI SHOSSO|\[reqId:|hidden-worker/i.test(String(t||''))
     // La interfaz añade y quita un punto al final mientras refresca ("LISTO" ↔
     // "LISTO ."), así que comparar en crudo reseteaba la cuenta en cada lectura
     // y la respuesta no se daba nunca por estable.
@@ -2196,7 +2200,7 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
     // Una orden del puente ya completa ("EJECUTAR {...}") es respuesta cerrada:
     // Notion no siempre marca "finished" en esos turnos y la peticion se
     // quedaba dando vueltas con la orden ya escrita en pantalla.
-    if(s.tieneMarca&&actual&&/EJECUTAR\s*\{[\s\S]*\}/.test(actual)){
+    if(s.tieneMarca&&actual&&!esContexto(actual)&&/EJECUTAR\s*\{[\s\S]*\}/.test(actual)){
       if(actual===norm(ultimo)) return actual
       ultimo=actual
     }
@@ -2204,11 +2208,11 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
     // marque "finished" (a veces no lo hace y la peticion se quedaba dando
     // vueltas con la contestacion ya escrita en pantalla). Se exigen tres
     // lecturas identicas para no cortar a mitad de redaccion.
-    if(s.tieneMarca&&actual&&!esProgreso(actual)){
+    if(s.tieneMarca&&actual&&!esProgreso(actual)&&!esContexto(actual)){
       if(actual===norm(ultimo)){ if(++estable>=(s.finished?1:2)) return actual }
       else { estable=0; ultimo=actual }
     }
-    if(actual&&actual!==norm(limpiar(base.answer))&&!esProgreso(actual)){
+    if(actual&&actual!==norm(limpiar(base.answer))&&!esProgreso(actual)&&!esContexto(actual)){
       // Tres lecturas idénticas seguidas: mientras escribe el texto crece y no
       // se cumple; en cuanto termina, se cumple en unos segundos.
       if(actual===norm(ultimo)){ estable++ } else { estable=0; ultimo=actual }
@@ -2773,6 +2777,14 @@ async function aperturaEnPc(texto){
   if(!destino){
     const hallado=await buscarPrograma(objetivo)
     if(hallado){ destino=hallado; esRutaCompleta=true }
+  }
+  // Sin programa instalado con ese nombre: si parece un servicio ("abre youtube",
+  // "abre gmail"), se abre su web. Antes se rendia y la peticion caia al modelo.
+  if(!destino&&palabrasObj.length===1&&/^[a-z0-9][a-z0-9.-]{2,30}$/i.test(objetivo)){
+    const sitio='https://'+objetivo.replace(/\s+/g,'').toLowerCase()+(/\./.test(objetivo)?'':'.com')
+    const r=await psEval('Start-Process '+JSON.stringify(sitio)+'; "OK"',20000)
+    log('[pc] web (sin programa) '+sitio+' -> '+(r.ok?'ok':'fallo'))
+    if(r.ok){ saveState({ultimoObjetivo:objetivo,version:VERSION}); return 'HECHO por el CLI: abierto '+sitio }
   }
   if(!destino) return null
   // Ruta COMPLETA: con el nombre a secas Start-Process no lo encuentra aunque se
