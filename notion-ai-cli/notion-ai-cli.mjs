@@ -1887,7 +1887,7 @@ async function getCdpForHidden() {
     // equivocada esta pantalla no monta composer y se perdian 90 s aqui.
     const freshModuleUrl='https://app.notion.com'+rutaChatActual()+'?mcpModule='+encodeURIComponent(String(state.mcpActiveModuleId))+(synchronizedAccount?.spaceId?'&spaceId='+encodeURIComponent(synchronizedAccount.spaceId):'')
     await client.call('Page.navigate',{url:freshModuleUrl},30000)
-    await sleep(4500)
+    await sleep(1200)
     // Si este workspace se quedo sin cupo no hay composer que esperar: cortar ya
     // para que la rotacion pruebe otro en vez de agotar 90 s aqui.
     try{
@@ -1933,7 +1933,7 @@ async function getCdpForHidden() {
     // el workspace principal y se esperaba un composer que alli no existe.
     const freshAiUrl='https://app.notion.com'+rutaChatActual()+'?spaceId='+encodeURIComponent(String(synchronizedAccount?.spaceId||''))
     await client.call('Page.navigate',{url:freshAiUrl},30000)
-    await sleep(4500)
+    await sleep(1200)
     await waitUntil(async()=>{try{return await client.evaluate("!!document.querySelector('[contenteditable=\"true\"][role=\"textbox\"], [aria-label=\"Start new chat\"], [aria-label=\"New chat\"]')",10000)}catch{return false}},45000,500,'nuevo chat del workspace MCP').catch(e=>{ log('[mcp-sync] el chat nuevo tardó; sigo igual ('+String(e.message||e).slice(0,60)+')') })
     workspaceSwitched=true
     saveState({selectedChatUrl:freshAiUrl,threadManuallySelected:false,selectedChatTitle:(synchronizedAccount?.workspace||'Workspace MCP')+' | MCP',lastSelectedAccount:synchronizedAccount,version:VERSION})
@@ -2126,9 +2126,11 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
   // Esperar 10 minutos a que el hilo se libere dejaba al usuario colgado sin
   // remedio: si en minuto y medio sigue ocupado, se estrena uno nuevo, que
   // siempre está libre.
-  const libre=await waitUntil(async()=>{const s=await chatSnapshot(cdp);return s.busy===false},90_000,700,'thread libre').catch(()=>false)
-  if(!libre){
-    log('[chat] el hilo sigue ocupado; estreno uno nuevo en vez de seguir esperando')
+  // Al instante: si el hilo está ocupado no se espera nada, se estrena otro.
+  // Esperar a que se libere era tiempo muerto puro (llegó a ser de 10 minutos).
+  const ocupado=await chatSnapshot(cdp).then(x=>x.busy===true).catch(()=>false)
+  if(ocupado){
+    log('[chat] el hilo está ocupado; estreno otro sin esperar')
     await estrenarChat(cdp).catch(()=>false)
   }
   const antes=await chatSnapshot(cdp)
@@ -2173,7 +2175,8 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
   }
   let enviado=false
   for(let intento=1;intento<=2&&!enviado;intento++){
-    for(let i=0;i<20&&!enviado;i++){ await sleep(1500); enviado=await promptEnPantalla() }
+    enviado=await promptEnPantalla()                       // primero, al instante
+    for(let i=0;i<30&&!enviado;i++){ await sleep(600); enviado=await promptEnPantalla() }
     if(!enviado&&intento===1){
       // Si Notion YA está generando, el prompt salió aunque no se vea todavía en
       // el texto de la página. Reinsertar aquí gastaba OTRA respuesta del cupo y
@@ -2216,7 +2219,7 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
   const conTope=(p,ms,alt)=>Promise.race([p,new Promise(r=>setTimeout(()=>r(alt),ms))])
   while(Date.now()<limite){
     if(duenoSeFue()) throw new Error('CLIENTE ABANDONADO: quien pidió esto cerró el CLI')
-    const s=await conTope(chatSnapshot(cdp,marcaEnvio),20000,{failed:true})
+    const s=await conTope(chatSnapshot(cdp,marcaEnvio),8000,{failed:true})
     // Latido: sin esto, cuando el bucle se quedaba esperando no habia forma de
     // saber que veia (ni si seguia vivo).
     if(++vueltas%10===0) log('[espera] v'+vueltas+' marca='+s.tieneMarca+' busy='+s.busy+' fin='+s.finished+' resp='+String(s.answer||'').slice(0,40))
@@ -2227,7 +2230,7 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
     if(s.failed||s.error||(s.tieneMarca===undefined&&!s.answer)){
       if(++lecturasMuertas>=5) throw new Error('CONTEXTO PERDIDO: la página de Notion se recargó y hay que rehacer la conexión')
     } else lecturasMuertas=0
-    if(s.failed){ await sleep(2000); continue }
+    if(s.failed){ await sleep(500); continue }
     for(const ev of await conTope(scanVisibleActivity(cdp),15000,[])){
       const k=[ev.tool,ev.action].join('|')
       // En una conversacion normal, las ordenes que el modelo arrastra del hilo
@@ -2335,8 +2338,8 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
       // se había perdido, reenviando y gastando otra respuesta del cupo. Se
       // confirma con calma antes de decidir.
       let confirmado=false
-      for(let i=0;i<6&&!confirmado;i++){
-        await sleep(2500)
+      for(let i=0;i<10&&!confirmado;i++){
+        await sleep(900)
         const otra=await chatSnapshot(cdp,marcaEnvio).catch(()=>null)
         if(otra&&otra.tieneMarca) confirmado=true
         else{
@@ -2464,7 +2467,9 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
       if(actual===norm(ultimo)){ estable++ } else { estable=0; ultimo=actual }
       if(estable>=2) return actual
     }
-    await sleep(2000)
+    // Leer cada 2 s añadía ~4 s de retraso tras terminar la respuesta: con 800 ms
+    // se nota al momento y el coste de leer es despreciable.
+    await sleep(800)
   }
   if(ultimo) return String(ultimo).replace(/[\s.·•…]+$/,'').trim()   // algo llegó: mejor eso que un timeout
   throw new Error('Timeout esperando respuesta del worker real')
@@ -4112,7 +4117,13 @@ async function abrirEspacio(client,spaceId){
   const orden=[rutaChatActual(),...RUTAS_CHAT.filter(r=>r!==rutaChatActual())]
   for(const ruta of orden){
     await client.call('Page.navigate',{url:spaceChatUrl(spaceId,ruta)},30000).catch(()=>{})
-    await sleep(6000)
+    // Antes se esperaban 6 s a ciegas: ahora se comprueba cada 300 ms y se sigue
+    // en cuanto la pagina esta lista (suele bastar 1 s).
+    for(let i=0;i<20;i++){
+      await sleep(300)
+      const listo=await client.evaluate("(()=>{const t=(document.body&&document.body.innerText)||'';return (document.querySelectorAll('[contenteditable=\"true\"]').length>0||/run out of free AI|AI is disabled|Start new chat/i.test(t))?'si':'no'})()").catch(()=>'no')
+      if(String(listo).includes('si')) break
+    }
     const ok=await client.evaluate("(()=>{const u=location.href;const dentro=!"+JSON.stringify(spaceId)+"||u.includes("+JSON.stringify(spaceId)+");const listo=!!document.querySelector('[contenteditable=\"true\"][role=\"textbox\"], [contenteditable=\"true\"], [aria-label=\"Start new chat\"], [aria-label=\"New chat\"]');return dentro&&listo})()",12000).catch(()=>false)
     if(ok===true||String(ok)==='true'){
       if(rutaChatActual()!==ruta){ saveState({chatRoute:ruta,version:VERSION}); log('[ruta] Notion sirve el chat en '+ruta) }
