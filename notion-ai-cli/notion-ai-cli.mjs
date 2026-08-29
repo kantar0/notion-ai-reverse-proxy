@@ -2722,6 +2722,39 @@ async function webEnPc(texto){
   return r.ok?('HECHO por el CLI: abierto '+url+(nav?' en '+nav:''))
              :('NO se pudo abrir '+url+': '+String(r.texto||'').slice(0,150))
 }
+// Buscar/reproducir algo en un sitio. Es un patron general (sitio + termino),
+// no una lista de aplicaciones: "busca X en youtube", "pon X en spotify",
+// "reproduce un video de X". Existe porque el modelo tarda minutos o se cuelga
+// justo en lo mas cotidiano.
+const SITIOS = {
+  youtube:'https://www.youtube.com/results?search_query=',
+  google:'https://www.google.com/search?q=',
+  spotify:'https://open.spotify.com/search/',
+  twitch:'https://www.twitch.tv/search?term=',
+  amazon:'https://www.amazon.com/s?k=',
+  wikipedia:'https://es.wikipedia.org/w/index.php?search=',
+}
+async function busquedaEnPc(texto){
+  const bruto=String(texto||'').trim(), bajo=bruto.toLowerCase()
+  const VERBOS=['busca','buscar','buscame','reproduce','reproducir','pon','ponme','poneme','corre','abre','abreme','mira','ver']
+  const palabras=bajo.split(/[^a-z0-9áéíóúñ]+/i).filter(Boolean)
+  if(!palabras.some(w=>VERBOS.some(v=>w.startsWith(v)))) return null
+  let sitio=null, clave=null
+  for(const k of Object.keys(SITIOS)){ if(bajo.includes(k)){ sitio=SITIOS[k]; clave=k; break } }
+  if(!sitio) return null
+  // El termino es lo que queda al quitar el sitio, los verbos y las muletillas.
+  const FUERA=new Set([clave,'busca','buscar','buscame','reproduce','reproducir','pon','ponme','poneme',
+    'corre','abre','abreme','mira','ver','un','una','el','la','los','las','lo','de','del','en','y','a',
+    'video','videos','cancion','tema','algo','cualquiera','porfa','favor','por','mi','pc','me'])
+  const termino=palabras.filter(w=>!FUERA.has(w)).join(' ').trim()
+  if(!termino) return null          // "abre youtube" a secas: es apertura, no busqueda
+  const url=sitio+encodeURIComponent(termino)
+  const r=await psEval('Start-Process '+JSON.stringify(url)+'; "OK"',20000)
+  log('[pc] buscar "'+termino+'" en '+clave+' -> '+(r.ok?'ok':'fallo'))
+  saveState({ultimoObjetivo:clave,version:VERSION})
+  return r.ok?('HECHO por el CLI: abierta la búsqueda de "'+termino+'" en '+clave)
+             :('NO se pudo buscar en '+clave+': '+String(r.texto||'').slice(0,150))
+}
 async function aperturaEnPc(texto){
   // Deteccion por palabras, no por una expresion larga: la version con regex
   // no casaba en ejecucion y fallaba en silencio.
@@ -2927,7 +2960,8 @@ async function processPrompt(userText, progress=()=>{}) {
     // no dependan de su humor. Todo lo demas sigue yendo por el modelo.
     // Se pueden apagar con "atajosPc": false en cli-state.json.
     const atajos=loadState().atajosPc!==false
-    const web=atajos?await webEnPc(userText).catch(e=>{log('[pc] web falló: '+String(e&&e.message||e).slice(0,120));return null}):null
+    const busqueda=atajos?await busquedaEnPc(userText).catch(e=>{log('[pc] búsqueda falló: '+String(e&&e.message||e).slice(0,120));return null}):null
+    const web=busqueda||(atajos?await webEnPc(userText).catch(e=>{log('[pc] web falló: '+String(e&&e.message||e).slice(0,120));return null}):null)
     const ventana=web||(atajos?await ventanaEnPc(userText).catch(e=>{log('[pc] ventana falló: '+String(e&&e.message||e).slice(0,120));return null}):null)
     const cerrado=ventana||(atajos?await cierreEnPc(userText).catch(e=>{log('[pc] cierre falló: '+String(e&&e.message||e).slice(0,120));return null}):null)
     const abierto=cerrado||(atajos?await aperturaEnPc(userText).catch(e=>{log('[pc] apertura falló: '+String(e&&e.message||e).slice(0,120));return null}):null)
