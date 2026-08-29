@@ -298,6 +298,27 @@ function getAccountSessionFile(account={}){
 function hasSavedSessionForAccount(account={}){
   try{return fs.existsSync(getAccountSessionFile(account))}catch{return false}
 }
+// Comprueba si el token de una cuenta SIGUE VIVO por API (con headers de
+// navegador, sin ellos Notion responde 403 a cualquier fetch). Es instantáneo y
+// no toca el motor CDP: antes, una sesión caducada solo se descubría tras un
+// timeout largo del navegador, y a mitad de una petición.
+async function sesionVivaPorApi(account={}){
+  try{
+    const f=getAccountSessionFile(account)
+    const ses=JSON.parse(fs.readFileSync(f,'utf8'))
+    const tok=(ses.cookies||[]).find(c=>c.name==='token_v2')
+    if(!tok) return {viva:false, motivo:'sin token'}
+    const res=await fetch('https://www.notion.so/api/v3/getSpaces',{method:'POST',
+      headers:{'content-type':'application/json','cookie':'token_v2='+tok.value,
+        'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+        'notion-client-version':'23.13.0.100'},body:'{}',signal:AbortSignal.timeout(12000)})
+    if(res.status===200){
+      const j=await res.json(); const uid=Object.keys(j)[0]
+      return {viva:true, workspaces:Object.keys(j[uid]?.space||{}).length}
+    }
+    return {viva:false, motivo:'HTTP '+res.status}
+  }catch(e){ return {viva:false, motivo:String(e&&e.message||e).slice(0,40)} }
+}
 function readJsonSafe(file,fallback={}){
   try{return JSON.parse(fs.readFileSync(file,'utf8'))}catch{return fallback}
 }
@@ -2564,6 +2585,18 @@ async function rotateToAvailableAccount(progress=()=>{},triedKeys=[],reason=''){
     const porCupo=new RegExp(QUOTA_TEXT_PATTERN,'i').test(String(reason||''))
     const aviso=porCupo?'Este workspace se quedó sin cupo; cambio a otro y sigo con tu petición'
                        :'Cambio de workspace y sigo con tu petición'
+    // Si el candidato es de OTRA cuenta, se comprueba por API que su sesión sigue
+    // viva antes de cargarla en el motor: cambiar a una cuenta caducada abre la
+    // pantalla de login y desperdicia segundos (y podía marcar como "sin cupo"
+    // algo que en realidad era sesión muerta). Los espacios de la MISMA cuenta
+    // ya activa no necesitan el chequeo.
+    if(candidate.uid!==current?.uid){
+      const vv=await sesionVivaPorApi(candidate)
+      if(!vv.viva){
+        log('[rotar] '+formatAccountLabel(candidate)+' tiene la sesión caducada ('+vv.motivo+'); la salto')
+        continue
+      }
+    }
     progress('retrying',aviso,{tool:'Task',action:aviso,detail:formatAccountLabel(candidate)})
     selectConnectedAccount(candidate)
     await usarPrecalentado(candidate.spaceId)   // si ya estaba cargado, el salto es inmediato
@@ -3859,6 +3892,20 @@ async function handleBridgeRequest(workingPath,req){
     else if(req.action==='thread-select'){const p=await selectThread(req.value);result={ok:true,id:req.id,text:`Thread seleccionado: ${p.title} | ${p.threadId||p.url}`,meta:p};log(`THREAD_SELECT ${req.id}`)}
     else if(req.action==='account'){const a=await getActiveAccount();result={ok:!a.error,id:req.id,text:'Cuenta: '+(a.email||a.userId||'sin detectar')+'\nNombre: '+(a.name||'Sin nombre visible')+'\nWorkspace: '+(a.workspace||'Workspace actual')+'\nChat: '+simplifyChatTitle(a.title||''),meta:a};log(`ACCOUNT ${req.id}`)}
     else if(req.action==='connect-account'){const a=await connectCurrentAccount();result={ok:true,id:req.id,text:'Conectado: '+formatAccountLabel(a)+'\nCorreo: '+(a.email||'No detectado todavía')+'\nWorkspace: '+(a.workspace||'Workspace actual')+'\nSesión guardada: '+(fs.existsSync(getAccountSessionFile(a))?'sí':'no'),meta:a};log(`CONNECT_ACCOUNT ${req.id}`)}
+    else if(req.action==='health'){
+      // Salud de cada cuenta por API, sin tocar el motor ni gastar cupo.
+      const emails=[...new Set(listConnectedAccounts().map(a=>a.email).filter(Boolean))]
+      const lineas=['Salud de las cuentas (sesión + workspaces vivos):']
+      for(const email of emails){
+        const cuenta=listConnectedAccounts().find(a=>a.email===email)
+        const v=await sesionVivaPorApi(cuenta)
+        lineas.push('  '+(v.viva?'✓':'✗')+' '+email+' — '+(v.viva?(v.workspaces+' workspaces, sesión viva'):('sesión caducada ('+v.motivo+') → inicia sesión en el navegador')))
+      }
+      const st=loadState(); const cc=(st.conCupoIds||[]).length
+      lineas.push('Workspaces con cupo ahora: '+cc+(cc?'':' — usa /cupo para reponer'))
+      result={ok:true,id:req.id,text:lineas.join(String.fromCharCode(10))}
+      log('HEALTH '+req.id)
+    }
     else if(req.action==='accounts'){const rows=listConnectedAccounts();result={ok:true,id:req.id,text:formatAccountsByOwner(rows),meta:rows};log(`ACCOUNTS ${req.id}`)}
     else if(req.action==='select-account'){const a=selectConnectedAccount(req.value);result={ok:true,id:req.id,text:'Cuenta activa: '+formatAccountLabel(a)+'\nSesión guardada: '+(a.hasSavedSession?'sí':'no')+(a.restoreQueued?'\nRestaurando sesión en segundo plano...':'')+(a.hasSavedSession&&!a.restoreQueued?'\nNo pude iniciar la restauración automática.':''),meta:a};log(`SELECT_ACCOUNT ${req.id}`)}
     else if(req.action==='next-account'){const a=selectNextConnectedAccount();result={ok:true,id:req.id,text:'Cuenta activa: '+formatAccountLabel(a)+'\nSesión guardada: '+(a.hasSavedSession?'sí':'no')+(a.restoreQueued?'\nRestaurando sesión en segundo plano...':'')+(a.hasSavedSession&&!a.restoreQueued?'\nNo pude iniciar la restauración automática.':''),meta:a};log(`NEXT_ACCOUNT ${req.id}`)}
