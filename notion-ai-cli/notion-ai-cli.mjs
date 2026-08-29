@@ -4022,6 +4022,27 @@ async function handleBridgeRequest(workingPath,req){
     else if(req.action==='thread-select'){const p=await selectThread(req.value);result={ok:true,id:req.id,text:`Thread seleccionado: ${p.title} | ${p.threadId||p.url}`,meta:p};log(`THREAD_SELECT ${req.id}`)}
     else if(req.action==='account'){const a=await getActiveAccount();result={ok:!a.error,id:req.id,text:'Cuenta: '+(a.email||a.userId||'sin detectar')+'\nNombre: '+(a.name||'Sin nombre visible')+'\nWorkspace: '+(a.workspace||'Workspace actual')+'\nChat: '+simplifyChatTitle(a.title||''),meta:a};log(`ACCOUNT ${req.id}`)}
     else if(req.action==='connect-account'){const a=await connectCurrentAccount();result={ok:true,id:req.id,text:'Conectado: '+formatAccountLabel(a)+'\nCorreo: '+(a.email||'No detectado todavía')+'\nWorkspace: '+(a.workspace||'Workspace actual')+'\nSesión guardada: '+(fs.existsSync(getAccountSessionFile(a))?'sí':'no'),meta:a};log(`CONNECT_ACCOUNT ${req.id}`)}
+    else if(req.action==='panel-accounts'){
+      // JSON estructurado para el panel: cada cuenta con su cupo REAL de créditos.
+      const emails=[...new Set(listConnectedAccounts().map(a=>a.email).filter(Boolean))]
+      const cuentas=[]
+      for(const email of emails){
+        const cuenta=listConnectedAccounts().find(a=>a.email===email)
+        const viva=await sesionVivaPorApi(cuenta)
+        let credit=null
+        if(viva.viva){ const cr=await creditosDeCuenta(cuenta); if(cr) credit=cr }
+        cuentas.push({email,
+          alive:!!viva.viva,
+          workspaces:viva.workspaces||0,
+          credits:credit?credit.disponibles:null,
+          used:credit?credit.usados:null,
+          limit:credit?credit.limite:null,
+          resetMs:credit?credit.resetMs:null,
+          active: cuenta && cuenta.key===getSelectedAccountKey()})
+      }
+      result={ok:true,id:req.id,accounts:cuentas}
+      log('PANEL_ACCOUNTS '+req.id+' n='+cuentas.length)
+    }
     else if(req.action==='session-accounts'){
       // Cuentas dentro de la sesión activa, por API directa (no toca el motor).
       // Es la prueba de si el multi-login funciona: si el token de la cuenta
