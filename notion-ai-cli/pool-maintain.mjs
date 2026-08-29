@@ -326,7 +326,7 @@ for (const d of detalle) {
   if (d.cupo) delete memoria[key]
   else if (d.plan === 'business-trial' || d.plan === 'free-agotado' || d.plan === 'ai-desactivada') memoria[key] = { t: Date.now(), plan: d.plan === 'business-trial' ? 'business-trial' : d.plan === 'ai-desactivada' ? 'ai-desactivada' : 'free' }
 }
-writeState({ quotaExhausted: memoria, spaceCreateBlockedBy: bloqueo, poolStatus: { at: new Date().toISOString(), conCupo, minimo: MINIMO, creados: creados.length } })
+writeState({ quotaExhausted: memoria, spaceCreateBlockedBy: bloqueo, conCupoIds: detalle.filter(x => x && x.cupo && x.spaceId).map(x => x.spaceId), poolStatus: { at: new Date().toISOString(), conCupo, minimo: MINIMO, creados: creados.length } })
 const salida = { conCupo, minimo: MINIMO, creados, detalle, sesionActiva: activa }
 if (JSON_OUT) console.log(JSON.stringify(salida))
 else say('pool: ' + conCupo + '/' + MINIMO + ' con cupo · ' + creados.length + ' creado(s)')

@@ -295,6 +295,15 @@ miembro**, y **no se reponen nunca**. De ahí salen tres conclusiones que ahorra
   con una respuesta por petición, un workspace rinde ~20 peticiones; con las fugas abiertas rendía
   dos o tres.
 
+**La rotación tiene que ordenar por cupo MEDIDO, no por la cuenta que capturaste del navegador.**
+Este fue el fallo más caro y el más difícil de ver: el CLI arrancaba siempre por la cuenta que
+detectaba en el navegador del usuario, y si esa cuenta tenía cuatro workspaces inservibles, se
+quemaba en ellos —tachándolos uno a uno— **sin llegar nunca** a los doce que sí tenían cupo en otra
+cuenta. Por fuera parece falta de cupo; por dentro es que ni se estaban probando los buenos.
+Guarda la lista de espacios que la última medición vio con cupo (`conCupoIds`) y ordena la rotación
+por ella. Señal de que te está pasando: **cero rotaciones "sin cupo" y aun así varios workspaces
+marcados como agotados en la misma tanda**.
+
 **Y no midas el cupo mirando si hay campo de escritura.** Un workspace agotado **también** lo pinta:
 contarlos como buenos hace que cada petición se pierda rotando por espacios secos. La comprobación
 fiable, y que no gasta ninguna respuesta, es **escribir un carácter sin enviar y mirar el botón**:

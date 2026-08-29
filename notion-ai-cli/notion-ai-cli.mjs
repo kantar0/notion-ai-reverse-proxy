@@ -649,8 +649,15 @@ function estaAgotado(key){
 function planAgotado(key){ return leerAgotado(key)?.plan||null }
 function listRotatableAccounts(excludeKeys=[]){
   const skip=new Set(excludeKeys.filter(Boolean))
-  return listConnectedAccounts().filter(a=>a.spaceId&&a.chatUrl&&hasSavedSessionForAccount(a)&&isMcpReadyAccount(a)&&!skip.has(a.key)&&!estaAgotado(a.key))
+  const listos=listConnectedAccounts().filter(a=>a.spaceId&&a.chatUrl&&hasSavedSessionForAccount(a)&&isMcpReadyAccount(a)&&!skip.has(a.key)&&!estaAgotado(a.key))
+  // Primero los que la ULTIMA medición vio con cupo. Sin esto la rotación
+  // arrancaba por la cuenta que capturó Zen aunque estuviera seca, y se quemaba
+  // tachando espacios buenos sin llegar nunca a los que sí servían.
+  const conCupo=new Set(loadState().conCupoIds||[])
+  if(!conCupo.size) return listos
+  return listos.slice().sort((x,y)=>(conCupo.has(y.spaceId)?1:0)-(conCupo.has(x.spaceId)?1:0))
 }
+
 function isSessionReadyAccount(account={}){
   return !!(account && account.spaceId && account.chatUrl && hasSavedSessionForAccount(account))
 }
