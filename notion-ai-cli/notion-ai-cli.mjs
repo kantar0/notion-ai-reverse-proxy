@@ -1822,7 +1822,7 @@ async function getCdpForHidden() {
     const freshAiUrl='https://app.notion.com'+rutaChatActual()+'?spaceId='+encodeURIComponent(String(synchronizedAccount?.spaceId||''))
     await client.call('Page.navigate',{url:freshAiUrl},30000)
     await sleep(4500)
-    await waitUntil(async()=>{try{return await client.evaluate("!!document.querySelector('[contenteditable=\"true\"][role=\"textbox\"], [aria-label=\"Start new chat\"], [aria-label=\"New chat\"]')",10000)}catch{return false}},45000,500,'nuevo chat del workspace MCP')
+    await waitUntil(async()=>{try{return await client.evaluate("!!document.querySelector('[contenteditable=\"true\"][role=\"textbox\"], [aria-label=\"Start new chat\"], [aria-label=\"New chat\"]')",10000)}catch{return false}},45000,500,'nuevo chat del workspace MCP').catch(e=>{ log('[mcp-sync] el chat nuevo tardó; sigo igual ('+String(e.message||e).slice(0,60)+')') })
     workspaceSwitched=true
     saveState({selectedChatUrl:freshAiUrl,threadManuallySelected:false,selectedChatTitle:(synchronizedAccount?.workspace||'Workspace MCP')+' | MCP',lastSelectedAccount:synchronizedAccount,version:VERSION})
   }
@@ -2896,11 +2896,13 @@ async function processPrompt(userText, progress=()=>{}) {
     let ultimoResultado=null
     const ordenesVistas=new Set()
     // Si la peticion nombra una ruta, se resuelve YA y se le da hecha.
-    // ATAJOS DESACTIVADOS (decisión del usuario, 2026-08-29): la IA se encarga de
-    // todo por el camino general (ordenes EJECUTAR que ejecuta el CLI). Los
-    // atajos deterministas quedan disponibles con "atajosPc": true en
-    // cli-state.json por si hiciera falta volver a ellos.
-    const atajos=loadState().atajosPc===true
+    // Atajos ACTIVOS. Se probo dejarselo todo al modelo y no funciona: se niega
+    // en seco ("no tengo acceso directo ni control remoto de tu PC") aunque el
+    // prompt le explique que el CLI ejecuta por el. No son una lista de
+    // aplicaciones: son las operaciones frecuentes resueltas por el CLI para que
+    // no dependan de su humor. Todo lo demas sigue yendo por el modelo.
+    // Se pueden apagar con "atajosPc": false en cli-state.json.
+    const atajos=loadState().atajosPc!==false
     const web=atajos?await webEnPc(userText).catch(e=>{log('[pc] web falló: '+String(e&&e.message||e).slice(0,120));return null}):null
     const ventana=web||(atajos?await ventanaEnPc(userText).catch(e=>{log('[pc] ventana falló: '+String(e&&e.message||e).slice(0,120));return null}):null)
     const cerrado=ventana||(atajos?await cierreEnPc(userText).catch(e=>{log('[pc] cierre falló: '+String(e&&e.message||e).slice(0,120));return null}):null)
