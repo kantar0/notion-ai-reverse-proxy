@@ -2484,12 +2484,19 @@ function abrirLocal(objetivo,cwd){
     // Si lo que se abre es una URL o un documento, no hay proceso con ese nombre:
     // se comprueba que haya aparecido un navegador (o se acepta sin verificar).
     const esUrl=/^(https?:|www\.)/i.test(String(objetivo).trim())
+    const esAcceso=/\.(lnk|url)$/i.test(String(objetivo))   // abre OTRO ejecutable: no vale comprobar su nombre
     const nombre=esUrl?'':String(objetivo).replace(/^.*[\/]/,'').replace(/\.(exe|lnk)$/i,'')
     const sonda=esUrl?'chrome,msedge,firefox,brave,opera':nombre
+    // Un .lnk apunta a otro ejecutable ("HaxBall AAA.lnk" -> app.exe): se resuelve
+    // el destino y se comprueba ESE nombre, que es el que aparece en procesos.
     const guion='$ErrorActionPreference="Stop";'+
+      (esAcceso?('$sh=New-Object -ComObject WScript.Shell;'+
+                 '$destino=$sh.CreateShortcut('+JSON.stringify(objetivo)+').TargetPath;'+
+                 '$sonda=[System.IO.Path]::GetFileNameWithoutExtension($destino);'):'$sonda=$null;')+
       'Start-Process -FilePath '+JSON.stringify(objetivo)+' -WorkingDirectory '+JSON.stringify(rutaReal(cwd||''))+';'+
       'Start-Sleep -Seconds 3;'+
-      '$p=Get-Process '+sonda.split(',').map(n=>JSON.stringify(n)).join(',')+' -ErrorAction SilentlyContinue;'+
+      'if(-not $sonda){$sonda=@('+sonda.split(',').map(n=>JSON.stringify(n)).join(',')+')};'+
+      '$p=Get-Process -Name $sonda -ErrorAction SilentlyContinue;'+
       'if($p){"ABIERTO:"+$p.Count}else{"LANZADO_SIN_VENTANA"}'
     const ps=spawn('powershell',['-NoProfile','-Command',guion],{windowsHide:true,stdio:['ignore','pipe','pipe']})
     let out='',err=''
@@ -2528,6 +2535,68 @@ async function ejecutarOrden(tool,args){
     return await ejecutarLocal(args.command,args.cwd)
   return await ejecutarHerramienta(tool,args)
 }
+// Abrir programas/archivos tampoco puede depender del modelo: arrastra ordenes
+// de mensajes anteriores del hilo (pidiendole el HaxBall repetia el "start
+// chrome" y hasta una busqueda de Google del mensaje de antes). Si la peticion
+// dice "abre X", lo abre el CLI y a Notion solo le llega la confirmacion.
+const APPS = { chrome:'chrome', 'google chrome':'chrome', edge:'msedge', firefox:'firefox',
+  notepad:'notepad', bloc:'notepad', explorador:'explorer', explorer:'explorer',
+  calculadora:'calc', spotify:'spotify', discord:'discord', code:'code', vscode:'code' }
+async function aperturaEnPc(texto){
+  // Deteccion por palabras, no por una expresion larga: la version con regex
+  // no casaba en ejecucion y fallaba en silencio.
+  const bruto=String(texto||'').trim()
+  const bajo=bruto.toLowerCase()
+  const VERBOS=['abreme','abre','abrir','abrime','lanza','lanzar','ejecuta','ejecutar','inicia','iniciar','pon']
+  let corte=-1, largo=0
+  for(const v of VERBOS){
+    const i=bajo.indexOf(v+' ')
+    if(i>=0&&(corte<0||i<corte)){ corte=i; largo=v.length }
+  }
+  if(corte<0) return null
+  let objetivo=bruto.slice(corte+largo).trim()
+  objetivo=objetivo.replace(/^(el|la|los|las|un|una)\s+/i,'')
+  objetivo=objetivo.replace(/^(programa|aplicaci[oó]n|app|archivo|fichero)\s+/i,'')
+  objetivo=objetivo.replace(/[.?!,]+$/,'').trim()
+  if(!objetivo||objetivo.length>60) return null
+  const clave=objetivo.toLowerCase()
+  // 1) aplicacion conocida
+  // Coincidencia flexible: el usuario dice "bloc de notas" o "el google chrome",
+  // no la clave exacta.
+  let destino=APPS[clave]||null
+  if(!destino){
+    const k=Object.keys(APPS).filter(x=>clave===x||clave.includes(x)).sort((a,b)=>b.length-a.length)[0]
+    if(k) destino=APPS[k]
+  }
+  // 2) si no, se busca un acceso directo o ejecutable que encaje (escritorio)
+  if(!destino){
+    // search_files devuelve resultados irrelevantes (busca dentro de node_modules
+    // y demas); el listado del escritorio es lo que de verdad encuentra el acceso
+    // directo.
+    let candidatos=[]
+    for(const carpeta of ['~/Desktop','~/AppData/Roaming/Microsoft/Windows/Start Menu/Programs']){
+      const r=await ejecutarHerramienta('list_files',{path:carpeta}).catch(()=>null)
+      try{ const j=JSON.parse(r&&r.texto||'[]'); if(Array.isArray(j)) candidatos.push(...j.map(x=>x.name).filter(Boolean)) }catch{}
+      if(candidatos.length) break
+    }
+    // Se puntua por palabras coincidentes en vez de exigirlas todas: el usuario
+    // dice "haxball aaa client" y el acceso directo se llama "HaxBall AAA.lnk".
+    const palabras=clave.split(/\s+/).filter(p=>p.length>2)
+    const puntuado=candidatos
+      .filter(c=>/\.(lnk|exe|bat|cmd|url)$/i.test(String(c)))
+      .map(c=>{ const s2=String(c).toLowerCase(); return {c,pts:palabras.filter(p=>s2.includes(p)).length} })
+      .filter(x=>x.pts>0)
+      .sort((a,b)=>b.pts-a.pts||String(a.c).length-String(b.c).length)
+    if(puntuado.length) destino=String(puntuado[0].c)
+  }
+  if(!destino) return null
+  // Ruta COMPLETA: con el nombre a secas Start-Process no lo encuentra aunque se
+  // le pase el directorio de trabajo.
+  const ruta=/^[A-Za-z]:|[\/]/.test(destino)?destino:path.join(os.homedir(),'Desktop',destino)
+  const r=await ejecutarLocal('start "'+ruta+'"','~/Desktop')
+  log('[pc] abrir '+destino+' -> '+(r.ok?'ok':'fallo'))
+  return (r.ok?'HECHO por el CLI: ':'NO se pudo abrir: ')+destino+' — '+String(r.texto||'').slice(0,200)
+}
 async function processPrompt(userText, progress=()=>{}) {
   const { runMode = DEFAULT_MODE } = loadState()
   appendTranscript('Usuario', userText)
@@ -2536,7 +2605,19 @@ async function processPrompt(userText, progress=()=>{}) {
     let ultimoResultado=null
     const ordenesVistas=new Set()
     // Si la peticion nombra una ruta, se resuelve YA y se le da hecha.
-    const escrito=await escrituraEnPc(userText).catch(()=>null)
+    const abierto=await aperturaEnPc(userText).catch(e=>{log('[pc] apertura falló: '+String(e&&e.message||e).slice(0,120));return null})
+    const escrito=abierto||await escrituraEnPc(userText).catch(e=>{log('[pc] escritura falló: '+String(e&&e.message||e).slice(0,120));return null})
+    // Una accion ya ejecutada (abrir, escribir) NO necesita que Notion redacte la
+    // confirmacion: el trabajo esta hecho y esperar a que conteste solo suma
+    // 30-60 s y el riesgo de que se cuelgue en su indicador de progreso.
+    if(abierto||escrito){
+      const hecho=String(abierto||escrito)
+      log('[pc] accion resuelta por el CLI; respondo sin esperar a Notion')
+      progress('complete','Hecho',{tool:'Terminal',action:'Completado'})
+      const limpio=hecho.replace(/^HECHO por el CLI:\s*/,'').replace(/^NO se pudo/,'No se pudo').trim()
+      appendTranscript('IA [cli]',limpio)
+      return limpio
+    }
     const previo=escrito||await contextoDelPc(userText)
     if(previo){
       progress('working','Leyendo tu PC',{tool:'Terminal',action:'Datos del PC'})
