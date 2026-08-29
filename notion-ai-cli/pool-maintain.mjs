@@ -205,7 +205,18 @@ for (const c of cuentas) {
   while (!SOLO_MEDIR && conCupo < MINIMO && !(bloqueo[c.email] > Date.now())) {
     const previos = (await listSpaces()).spaces.map(x => x.id)
     const nuevo = await crearUno(previos)
-    if (!nuevo) { bloqueo[c.email] = Date.now() + 60 * 60 * 1000; say('  ' + c.email + ': Notion corta por ritmo, reintento en 1h'); break }
+    if (!nuevo) {
+      // Antes se daba por hecho que era el 429 de ritmo y se apartaba la cuenta
+      // una hora. Puede ser eso... o que el flujo de alta de Notion haya
+      // cambiado y el menu ni se abra, que es un fallo NUESTRO y no se arregla
+      // esperando. Se distingue: si la sesion sigue viva, no es ritmo.
+      const viva = !!(await listSpaces()).uid
+      bloqueo[c.email] = Date.now() + (viva ? 10 : 60) * 60 * 1000
+      say('  ' + c.email + (viva
+        ? ': no pude abrir el alta de workspace (la interfaz de Notion no responde al menú); reintento en 10min'
+        : ': sesión caducada, hay que volver a iniciarla; reintento en 1h'))
+      break
+    }
     const m = await medir(nuevo)
     say('  ' + c.email + ': creado ' + nuevo.slice(0, 8) + ' · ' + (m.cupo ? 'con cupo' : 'sin cupo (' + m.plan + ')'))
     creados.push({ email: c.email, spaceId: nuevo, ...m })
