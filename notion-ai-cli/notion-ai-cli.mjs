@@ -2755,7 +2755,10 @@ function psEval(guion,topeMs=45000){
     // -EncodedCommand (UTF-16LE en base64): pasar el guion con -Command hacia que
     // Windows re-serializara los argumentos y rompiera las comillas internas, asi
     // que guiones que funcionaban a mano devolvian vacio.
-    const b64=Buffer.from(String(guion),'utf16le').toString('base64')
+    // Salida en UTF-8: sin esto los acentos volvian rotos ("pï¿½ginas") porque
+    // PowerShell escribe en la pagina de codigos de la consola.
+    const conUtf8='[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;'+String.fromCharCode(10)+String(guion)
+    const b64=Buffer.from(conUtf8,'utf16le').toString('base64')
     const ps=spawn('powershell',['-NoProfile','-EncodedCommand',b64],{windowsHide:true,stdio:['ignore','pipe','pipe']})
     let out='',err=''
     ps.stdout.on('data',d=>{out+=String(d)})
