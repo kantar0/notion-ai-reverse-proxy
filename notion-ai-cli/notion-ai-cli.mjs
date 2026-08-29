@@ -2617,7 +2617,11 @@ function extraerOrden(texto){
   // se ejecutaba la primera y se quedaba a medias abriendo pestañas sueltas.
   // Literal, NO construido desde una cadena: al escaparlo dos veces el patron
   // quedaba en "EJECUTARs*..." y no reconocia ninguna orden.
-  const todas=[...t.matchAll(/EJECUTAR\s*(\{[^]*?\})/gi)]
+  // Hasta la ULTIMA llave de la linea, no la primera: un script de PowerShell
+  // lleva llaves dentro ("{ 1 } else { Start-Process calc }") y cortar en la
+  // primera dejaba el comando en "powershell -NoProfile -Command", que no hace
+  // nada. Esa respuesta ya estaba pagada.
+  const todas=[...t.matchAll(/EJECUTAR\s*(\{.*\})/gim)]
   // Descartar las lineas de MUESTRA: el prompt viaja escrito en el propio hilo,
   // asi que sus ejemplos se leian como ordenes y se ejecutaban de verdad (llego
   // a abrir el bloc de notas, el explorador y a matar Spotify de una tacada).

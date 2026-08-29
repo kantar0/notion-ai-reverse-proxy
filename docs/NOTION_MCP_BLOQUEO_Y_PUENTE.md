@@ -147,6 +147,12 @@ petición cueste de verdad una sola:
 Y no aceptes cualquier hilo `?t=` guardado: comprueba que es **de la cuenta activa**. Si es de otro
 workspace, Notion recarga con un chat nuevo y la petición se pierde.
 
+- **No cortes el JSON de la orden en la primera llave.** Un script de PowerShell lleva llaves
+  dentro (`if (...) { 'ya' } else { Start-Process calc }`), y un patrón perezoso deja el comando en
+  `powershell -NoProfile -Command`, que solo imprime la ayuda. La respuesta ya estaba pagada, y
+  encima obliga al usuario a repetir la petición: dos respuestas por nada. Recorta hasta la última
+  llave de la línea.
+
 **Medido:** con esto, "abre la calculadora" pasó de nueve envíos sin resultado a **un solo envío**,
 con la aplicación abierta en 42 segundos.
 
