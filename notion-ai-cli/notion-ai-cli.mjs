@@ -2229,7 +2229,13 @@ async function executeHiddenPrompt(userText,progress=()=>{}){
   progress('connecting','Conectando con el worker real de Notion',{tool:'WebFetch',action:'CDP 127.0.0.1:9223'})
   const client=await getCdpForHidden()
   try{
-    const scopedPrompt=buildScopedPrompt(userText,Math.random().toString(36).slice(2,10))
+    let extraPc=''
+    if(pidePc(userText)){
+      const abiertos=await programasAbiertos().catch(()=>'')
+      if(abiertos) extraPc=String.fromCharCode(10)+'PROGRAMAS YA ABIERTOS EN EL PC: '+abiertos+
+        String.fromCharCode(10)+'(si el programa ya está abierto NO lo vuelvas a lanzar: actúa sobre él)'
+    }
+    const scopedPrompt=buildScopedPrompt(userText+extraPc,Math.random().toString(36).slice(2,10))
     const a=sanitizeForTerminal(await runThreadPrompt(client,scopedPrompt,progress,'Prompt oculto'))
         // Con el puente no se usa el MCP de Notion: si la respuesta menciona fallos
     // de MCP es ruido suyo, no hay nada que reprovisionar.
@@ -2411,7 +2417,11 @@ function pidePc(texto){
 }
 function extraerOrden(texto){
   const t=String(texto||'')
-  const m=t.match(/EJECUTAR\s*(\{[\s\S]*\})/i)
+  // El modelo escribe varias ordenes seguidas mientras razona (abrir youtube,
+  // luego buscar, luego el video): la ULTIMA es la que de verdad quiere. Antes
+  // se ejecutaba la primera y se quedaba a medias abriendo pestañas sueltas.
+  const todas=[...t.matchAll(new RegExp('EJECUTAR\\s*(\\{[^]*?\\})','gi'))]
+  const m=todas.length?todas[todas.length-1]:t.match(/EJECUTAR\s*(\{[\s\S]*\})/i)
   if(!m) return null
   try{
     const o=JSON.parse(m[1])
@@ -2517,10 +2527,16 @@ function comandoDeApertura(comando){
     const partes=resto.split(/\s+/)
     prog=partes.shift()
     args=partes.length?partes.join(' '):null
-    // Una ruta con espacios sin comillas: se toma entera si existe tal cual.
-    if(args&&/[\/]/.test(resto)&&!/^https?:/i.test(args)){ prog=resto; args=null }
+    // Una ruta con espacios y sin comillas ("start C:/Program Files/x.exe") se
+    // toma entera; pero si lo que sigue al programa es claramente un argumento
+    // (una URL, aunque venga entrecomillada, o una opcion), NO se junta.
+    const pareceArgumento=args&&/^["']?(https?:|--|\/|-)/i.test(args)
+    if(args&&!pareceArgumento&&/[\/]/.test(resto)){ prog=resto; args=null }
   }
   prog=String(prog||'').replace(/^["']|["']$/g,'').trim()
+  // El modelo entrecomilla las URLs ("start chrome 'https://...'") y Chrome
+  // recibia las comillas como parte de la direccion.
+  if(args) args=String(args).trim().replace(/^["']+|["']+$/g,'').trim()||null
   return prog?{prog,args}:null
 }
 function abrirLocal(objetivo,cwd,argumentos){
@@ -2666,6 +2682,17 @@ function extraerUrl(texto){
   let u=m[1].replace(/[.,;]+$/,'')
   if(!/^https?:/i.test(u)) u='https://'+u
   return u
+}
+// Lista de programas con ventana abierta. Sin esto el modelo no sabia que
+// Chrome ya estaba abierto y volvia a lanzarlo una y otra vez.
+let _abiertos={t:0,txt:''}
+async function programasAbiertos(){
+  if(Date.now()-_abiertos.t<15000) return _abiertos.txt
+  const r=await psEval('Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | '+
+    'Select-Object -ExpandProperty ProcessName -Unique | Sort-Object', 15000).catch(()=>null)
+  const txt=String(r&&r.texto||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean).join(', ').slice(0,400)
+  _abiertos={t:Date.now(),txt}
+  return txt
 }
 async function webEnPc(texto){
   const bruto=String(texto||'').trim(), bajo=bruto.toLowerCase()
@@ -2905,7 +2932,11 @@ async function processPrompt(userText, progress=()=>{}) {
       // el resultado (se vieron 5 vueltas con "cmd /c start chrome"). Repetirla
       // no aporta: se corta y se le exige la respuesta con lo que ya tiene.
       if(orden){
-        const huella=orden.tool+' '+JSON.stringify(orden.args)
+        // Huella por ACCION, no por texto exacto: "start chrome <url1>" y
+        // "start chrome <url2>" son la misma accion repetida y llenaban la
+        // pantalla de pestañas.
+        const cmd=String(orden.args&&orden.args.command||'')
+        const huella=orden.tool+' '+(cmd?cmd.split(/\s+/).slice(0,2).join(' '):JSON.stringify(orden.args))
         if(ordenesVistas.has(huella)){
           log('[puente] orden repetida ('+orden.tool+'); cierro con lo que ya hay')
           respuesta=await runHiddenPromptWithRotation(
