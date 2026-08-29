@@ -368,8 +368,16 @@ async function preseleccionarCuentaConCredito(){
     if(uid) base['x-notion-active-user-header']=uid
     const g=await fetch('https://www.notion.so/api/v3/getSpaces',{method:'POST',headers:base,body:'{}',signal:AbortSignal.timeout(10000)})
     const gj=await g.json(); const u=Object.keys(gj)[0]; const spaces=gj[u]?.space||{}
-    // Probar spaces hasta uno que reporte créditos (free con IA), no not_applicable.
-    for(const sp of Object.keys(spaces).slice(0,6)){
+    // Elegir un space FREE (no business: el business tiene la IA desactivada y no
+    // monta composer). getPublicSpaceData da el subscriptionTier.
+    for(const sp of Object.keys(spaces).slice(0,10)){
+      // ¿Es business/team? -> saltar (no hay composer ahí).
+      let tier=''
+      try{
+        const pd=await fetch('https://www.notion.so/api/v3/getPublicSpaceData',{method:'POST',headers:base,body:JSON.stringify({type:'space-ids',spaceIds:[sp]}),signal:AbortSignal.timeout(6000)})
+        if(pd.status===200){ const pj=await pd.json(); tier=String(pj.results?.[0]?.subscriptionTier||'') }
+      }catch{}
+      if(/business|enterprise|team/i.test(tier)) continue
       const c=await fetch('https://www.notion.so/api/v3/getCreditRateLimitStatus',{method:'POST',headers:base,body:JSON.stringify({spaceId:sp}),signal:AbortSignal.timeout(6000)})
       if(c.status!==200) continue
       const cj=await c.json().catch(()=>null)
@@ -1537,7 +1545,9 @@ async function insertPrompt(cdp,text){
     if(!s.hasInput){
       try{
         const rec=await ensureComposer(cdp,log,loadState())
-        log('[recovery] resultado: '+JSON.stringify(rec)); if(rec&&rec.strategy==='ai-deshabilitado') throw new Error('AI DESHABILITADA en el workspace de la cuenta del CLI (Abigail Moya\'s Space). Notion AI no puede responder ni usar el MCP de control de PC desde esa cuenta. Cambia la cuenta activa del CLI a una con Notion AI habilitado.')
+        log('[recovery] resultado: '+JSON.stringify(rec))
+        if(rec&&(rec.strategy==='sin-cupo'||rec.strategy==='agotado')) throw new Error('Notion AI sin cupo o créditos en este workspace; roto a otra cuenta')
+        if(rec&&rec.strategy==='ai-deshabilitado') throw new Error('AI DESHABILITADA en el workspace de la cuenta del CLI (Abigail Moya\'s Space). Notion AI no puede responder ni usar el MCP de control de PC desde esa cuenta. Cambia la cuenta activa del CLI a una con Notion AI habilitado.')
       }catch(e){ const __m=String(e&&e.message||e); log('[recovery] error: '+__m); if(/AI DESHABILITADA/.test(__m)) throw e }
       s=await surface()
     }
