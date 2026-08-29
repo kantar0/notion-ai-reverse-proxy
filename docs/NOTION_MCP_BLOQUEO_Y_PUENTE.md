@@ -90,6 +90,28 @@ acceso a tu PC" a la misma petición, con el mismo prompt. De ahí que exista el
 - **Cuenta mal**: dijo 48 carpetas donde había 75 → el recuento lo calcula el CLI y se le
   pasa ya hecho.
 
+### Ejecutar comandos y abrir programas: NO por el MCP
+
+Tres fallos encadenados hacían que "abre Chrome" respondiera *"listo"* sin abrir nada:
+
+1. **El servidor MCP no encuentra `cmd.exe`** (`Error: spawn cmd.exe ENOENT`): su PATH no
+   incluye System32. Antes de eso devolvía `ok:true, statusCode:0` sin ejecutar nada.
+   → `run_command` y `start_background_command` los ejecuta **el daemon**, que corre en la
+   sesión del usuario (`ejecutarOrden()`); el resto de herramientas siguen yendo al MCP.
+2. **`cmd /c start X` no abre ventanas** cuando lo lanza un proceso hijo: `cmd` termina y
+   se lleva la aplicación por delante. → se traducen a `Start-Process`
+   (`comandoDeApertura()` + `abrirLocal()`).
+3. **Se daba por bueno el lanzamiento.** → ahora se **comprueba que el proceso existe**
+   (`Get-Process`) y, si no aparece, se dice; nada de "ya está abierto" a ciegas.
+
+Detalle de entorno: si el daemon se lanza desde un contexto **sin sesión gráfica** (por
+ejemplo, un servicio o una shell sin escritorio), no hay dónde dibujar la ventana. El
+daemon debe nacer en la sesión interactiva del usuario.
+
+**El modelo repite la misma orden** una y otra vez aunque ya tenga el resultado (se vieron
+5 vueltas seguidas con `cmd /c start chrome`, 229 s). Las órdenes ya ejecutadas se
+memorizan por petición: si se repite una, se corta y se le exige la respuesta.
+
 ## 4. Consecuencia: el MCP deja de ser requisito
 
 Con el puente activo (`cli-state.mcpBridge !== false`, por defecto):

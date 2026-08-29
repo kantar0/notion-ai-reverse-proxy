@@ -2450,12 +2450,78 @@ async function escrituraEnPc(texto){
     ? 'HECHO por el CLI: archivo '+ruta+' escrito con el contenido: '+contenido
     : 'NO se pudo escribir '+ruta+': '+String(r.texto||'').slice(0,200)
 }
+// Los comandos NO se mandan al servidor MCP: alli se ejecutan sin sesion de
+// escritorio y sin PATH completo ("Error: spawn cmd.exe ENOENT"), asi que
+// "abre Chrome" devolvia ok sin abrir nada. El daemon corre en la sesion del
+// usuario, de modo que lanzarlos aqui si abre ventanas de verdad.
+function rutaReal(p){
+  const base=os.homedir()
+  let r=String(p||'').trim().replace(/^~[/\\]?/,'')
+  if(/^[A-Za-z]:/.test(r)) return r
+  return r?path.join(base,r):base
+}
+// "cmd /c start X" no abre nada lanzado desde el daemon: cmd termina y se lleva
+// al hijo por delante. Para ABRIR algo hay que usar Start-Process y soltarlo.
+function comandoDeApertura(comando){
+  const c=String(comando||'').trim()
+  const m=c.match(/^(?:cmd(?:\.exe)?\s+\/c\s+)?start\s+(?:"[^"]*"\s+|''\s+)?(.+)$/i)
+  if(!m) return null
+  let obj=m[1].trim().replace(/^["']|["']$/g,'').trim()
+  return obj||null
+}
+function abrirLocal(objetivo,cwd){
+  return new Promise(resolve=>{
+    // Se COMPRUEBA que la ventana existe de verdad: dar por bueno el lanzamiento
+    // hacia que el CLI dijera "listo, ya esta abierto" sin haber abierto nada
+    // (pasa si el daemon corre sin sesion grafica: entonces no hay escritorio
+    // donde dibujar la ventana).
+    const nombre=String(objetivo).replace(/^.*[\/]/,'').replace(/\.(exe|lnk)$/i,'')
+    const guion='$ErrorActionPreference="Stop";'+
+      'Start-Process -FilePath '+JSON.stringify(objetivo)+' -WorkingDirectory '+JSON.stringify(rutaReal(cwd||''))+';'+
+      'Start-Sleep -Seconds 3;'+
+      '$p=Get-Process '+JSON.stringify(nombre)+' -ErrorAction SilentlyContinue;'+
+      'if($p){"ABIERTO:"+$p.Count}else{"LANZADO_SIN_VENTANA"}'
+    const ps=spawn('powershell',['-NoProfile','-Command',guion],{windowsHide:true,stdio:['ignore','pipe','pipe']})
+    let out='',err=''
+    ps.stdout.on('data',d=>{out+=String(d)})
+    ps.stderr.on('data',d=>{err+=String(d)})
+    ps.on('error',e=>resolve({ok:false,texto:'no pude abrir '+objetivo+': '+e.message}))
+    ps.on('close',()=>{
+      const t=out.trim()
+      if(/^ABIERTO:/.test(t)) return resolve({ok:true,texto:'abierto: '+objetivo+' ('+t.split(':')[1]+' procesos)'})
+      if(err.trim()) return resolve({ok:false,texto:'no se pudo abrir '+objetivo+': '+err.trim().slice(0,200)})
+      resolve({ok:false,texto:'lancé '+objetivo+' pero NO aparece ninguna ventana; probablemente el daemon no tiene sesión de escritorio'})
+    })
+  })
+}
+function ejecutarLocal(comando,cwd){
+  const apertura=comandoDeApertura(comando)
+  if(apertura) return abrirLocal(apertura,cwd)
+  return new Promise(resolve=>{
+    const shell=process.env.ComSpec||'C:\Windows\System32\cmd.exe'
+    const hijo=spawn(shell,['/d','/s','/c',String(comando)],
+      {cwd:rutaReal(cwd||''),windowsHide:true,detached:false,stdio:['ignore','pipe','pipe']})
+    let out='',err=''
+    hijo.stdout.on('data',d=>{out+=String(d)})
+    hijo.stderr.on('data',d=>{err+=String(d)})
+    const tope=setTimeout(()=>{try{hijo.kill()}catch{}; resolve({ok:true,texto:(out||'(lanzado en segundo plano)').slice(0,4000)})},20000)
+    hijo.on('close',code=>{clearTimeout(tope)
+      resolve({ok:code===0,texto:((out+(err?String.fromCharCode(10)+err:''))||'(sin salida, codigo '+code+')').slice(0,4000)})})
+    hijo.on('error',e=>{clearTimeout(tope); resolve({ok:false,texto:'no pude ejecutar: '+e.message})})
+  })
+}
+async function ejecutarOrden(tool,args){
+  if(tool==='run_command'||tool==='start_background_command')
+    return await ejecutarLocal(args.command,args.cwd)
+  return await ejecutarHerramienta(tool,args)
+}
 async function processPrompt(userText, progress=()=>{}) {
   const { runMode = DEFAULT_MODE } = loadState()
   appendTranscript('Usuario', userText)
   progress('analyzing','Analizando la solicitud y el contexto del workspace',{tool:'Task',action:'Analizar solicitud',detail:'Modo '+runMode})
   if (runMode === 'hidden') {
     let ultimoResultado=null
+    const ordenesVistas=new Set()
     // Si la peticion nombra una ruta, se resuelve YA y se le da hecha.
     const escrito=await escrituraEnPc(userText).catch(()=>null)
     const previo=escrito||await contextoDelPc(userText)
@@ -2468,6 +2534,20 @@ async function processPrompt(userText, progress=()=>{}) {
     // encadene ordenes sin fin.
     for(let paso=1;paso<=5;paso++){
       const orden=extraerOrden(respuesta)
+      // El modelo repite la MISMA orden una y otra vez aunque ya le hayamos dado
+      // el resultado (se vieron 5 vueltas con "cmd /c start chrome"). Repetirla
+      // no aporta: se corta y se le exige la respuesta con lo que ya tiene.
+      if(orden){
+        const huella=orden.tool+' '+JSON.stringify(orden.args)
+        if(ordenesVistas.has(huella)){
+          log('[puente] orden repetida ('+orden.tool+'); cierro con lo que ya hay')
+          respuesta=await runHiddenPromptWithRotation(
+            'Ya se ejecuto eso. Resultado:'+String.fromCharCode(10)+String(ultimoResultado||'(sin salida)').slice(0,4000)+
+            String.fromCharCode(10,10)+'Responde AHORA al usuario, sin EJECUTAR. Peticion: '+userText,progress)
+          break
+        }
+        ordenesVistas.add(huella)
+      }
       if(!orden){
         // Pidio una orden pero con el JSON mal formado: se le devuelve lo que ya
         // se obtuvo y se le exige contestar, en vez de soltarle al usuario la
@@ -2488,7 +2568,7 @@ async function processPrompt(userText, progress=()=>{}) {
       for(const [k,v] of Object.entries(orden.args||{})) limpios[k]=typeof v==='string'?v.normalize('NFKC'):v
       orden.args=limpios
       let salida
-      try{ salida=await ejecutarHerramienta(orden.tool,orden.args) }
+      try{ salida=await ejecutarOrden(orden.tool,orden.args) }
       catch(error){ salida={ok:false,texto:'fallo al ejecutar: '+error.message} }
       let recorte=String(salida.texto||'').slice(0,6000)
       // Contar lo hace el CLI: el modelo se equivocaba al contar sobre el
@@ -2530,7 +2610,7 @@ async function processPrompt(userText, progress=()=>{}) {
         const limpios={}
         for(const [k,v] of Object.entries(orden.args||{})) limpios[k]=typeof v==='string'?v.normalize('NFKC'):v
         let salida
-        try{ salida=await ejecutarHerramienta(orden.tool,limpios) }
+        try{ salida=await ejecutarOrden(orden.tool,limpios) }
         catch(error){ salida={ok:false,texto:'fallo al ejecutar: '+error.message} }
         let recorte=String(salida.texto||'').slice(0,6000)
         try{
