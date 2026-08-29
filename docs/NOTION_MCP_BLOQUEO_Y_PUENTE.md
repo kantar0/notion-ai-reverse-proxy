@@ -153,6 +153,15 @@ workspace, Notion recarga con un chat nuevo y la petición se pierde.
   encima obliga al usuario a repetir la petición: dos respuestas por nada. Recorta hasta la última
   llave de la línea.
 
+- **No le pidas que redacte algo que ya tienes.** Tres caminos del bucle (orden repetida, JSON mal
+  formado, pasos agotados) terminaban preguntando a la IA con el resultado ya en la mano. Eso es una
+  respuesta entera del cupo para no aportar nada: presenta el dato y cierra.
+
+**Y sube la oferta, no solo el ahorro.** El cupo va por workspace, así que el colchón del pool ES
+la reserva: con el mínimo en 3 se secaba a las pocas peticiones. Se configura en `cli-state.json`
+(`poolMinimo`) y el mantenimiento repone solo, repartiendo la creación entre cuentas y respetando
+el 429 de ritmo (que es por cuenta: se anota la cortada y se sigue por otra).
+
 **Medido:** con esto, "abre la calculadora" pasó de nueve envíos sin resultado a **un solo envío**,
 con la aplicación abierta en 42 segundos.
 

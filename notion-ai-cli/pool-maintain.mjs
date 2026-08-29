@@ -22,7 +22,12 @@ const SESSIONS = path.join(DIR, 'account-sessions')
 const STATE = path.join(DIR, 'cli-state.json')
 const CDP = process.env.CDP_URL || 'http://127.0.0.1:9223'
 const arg = n => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : null }
-const MINIMO = parseInt(arg('--minimo') || process.env.POOL_MINIMO || '3', 10)
+// El colchon se configura en cli-state (poolMinimo): con 3 el pool se secaba a
+// las pocas peticiones, porque cada una consume una respuesta de un workspace.
+function minimoDelEstado(){
+  try{ return parseInt(JSON.parse(fs.readFileSync(path.join(DIR,'cli-state.json'),'utf8')).poolMinimo,10)||0 }catch{ return 0 }
+}
+const MINIMO = parseInt(arg('--minimo') || process.env.POOL_MINIMO || '', 10) || minimoDelEstado() || 12
 const JSON_OUT = process.argv.includes('--json')
 const say = (...a) => { if (!JSON_OUT) console.log(...a) }
 

@@ -3297,6 +3297,14 @@ async function processPrompt(userText, progress=()=>{}) {
         const huella=orden.tool+' '+JSON.stringify(orden.args)
         if(ordenesVistas.has(huella)){
           log('[puente] orden repetida ('+orden.tool+'); cierro con lo que ya hay')
+          // Con el resultado ya en la mano, pedirle que lo redacte gasta OTRA
+          // respuesta del cupo para no aportar nada nuevo.
+          if(!loadState().redactarConIA){
+            progress('complete','Hecho',{tool:'Terminal',action:'Completado'})
+            const listo=String(ultimoResultado||'').trim()||'Hecho.'
+            appendTranscript('IA [cli]',listo)
+            return listo
+          }
           respuesta=await runHiddenPromptWithRotation(
             'Ya se ejecuto eso. Resultado:'+String.fromCharCode(10)+String(ultimoResultado||'(sin salida)').slice(0,4000)+
             String.fromCharCode(10,10)+'Responde AHORA al usuario, sin EJECUTAR. Peticion: '+userText,progress)
@@ -3308,6 +3316,12 @@ async function processPrompt(userText, progress=()=>{}) {
         // Pidio una orden pero con el JSON mal formado: se le devuelve lo que ya
         // se obtuvo y se le exige contestar, en vez de soltarle al usuario la
         // linea cruda "EJECUTAR {...}".
+        if(/EJECUTAR/i.test(String(respuesta||''))&&ultimoResultado!==null&&!loadState().redactarConIA){
+          progress('complete','Hecho',{tool:'Terminal',action:'Completado'})
+          const listo=String(ultimoResultado||'').trim()||'Hecho.'
+          appendTranscript('IA [cli]',listo)
+          return listo
+        }
         if(/EJECUTAR/i.test(String(respuesta||''))&&ultimoResultado!==null){
           respuesta=await runHiddenPromptWithRotation(
             'Ya tienes este resultado del PC:'+String.fromCharCode(10)+ultimoResultado.slice(0,6000)+
@@ -3428,6 +3442,13 @@ async function processPrompt(userText, progress=()=>{}) {
     }
     // Si agoto los pasos y sigue pidiendo herramientas, se le exige la respuesta
     // final con lo ya obtenido: al usuario nunca le llega un "EJECUTAR {...}".
+    if(/EJECUTAR/i.test(String(respuesta||''))&&ultimoResultado!==null&&!loadState().redactarConIA){
+      // Ultima fuga del bucle: el dato ya esta, redactarlo cuesta otra respuesta.
+      progress('complete','Hecho',{tool:'Terminal',action:'Completado'})
+      const listo=String(ultimoResultado||'').trim()||'Hecho.'
+      appendTranscript('IA [cli]',listo)
+      return listo
+    }
     if(/EJECUTAR/i.test(String(respuesta||''))&&ultimoResultado!==null){
       respuesta=await runHiddenPromptWithRotation(
         'Este es el resultado del PC:'+String.fromCharCode(10)+ultimoResultado.slice(0,6000)+
