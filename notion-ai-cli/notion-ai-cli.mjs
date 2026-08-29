@@ -2611,6 +2611,8 @@ async function aperturaEnPc(texto){
   const ruta=/^[A-Za-z]:|[\/]/.test(destino)?destino:path.join(os.homedir(),'Desktop',destino)
   const r=await ejecutarLocal('start "'+ruta+'"','~/Desktop')
   log('[pc] abrir '+destino+' -> '+(r.ok?'ok':'fallo'))
+  // Se recuerda para poder atender "cierralo" despues, sin nombrar nada.
+  if(r.ok) saveState({ultimoAbierto:{objetivo,destino,at:Date.now()},version:VERSION})
   return (r.ok?'HECHO por el CLI: ':'NO se pudo abrir: ')+destino+' — '+String(r.texto||'').slice(0,200)
 }
 // Cerrar programas, tambien sin depender del modelo: pedia
@@ -2624,15 +2626,29 @@ function esProtegido(nombre){
 }
 async function cierreEnPc(texto){
   const bruto=String(texto||'').trim(), bajo=bruto.toLowerCase()
-  const VERBOS=['cierra','cerrar','cierrame','ciérrame','mata','matar','termina','terminar','finaliza','finalizar']
-  let corte=-1,largo=0
-  for(const v of VERBOS){ const i=bajo.indexOf(v+' '); if(i>=0&&(corte<0||i<corte)){corte=i;largo=v.length} }
+  const VERBOS=['cierralo','ciérralo','cierrala','ciérrala','cierralos','ciérralos','cierrame','ciérrame',
+    'cierra','cerrar','cierralo','matalo','mátalo','mata','matar','termina','terminar','finaliza','finalizar']
+  let corte=-1,largo=0,conPronombre=false
+  for(const v of VERBOS){
+    const i=bajo.indexOf(v)
+    if(i<0) continue
+    const sig=bajo[i+v.length]
+    if(sig!==undefined&&sig!==' '&&sig!=='.'&&sig!==',') continue   // evitar cazar dentro de otra palabra
+    if(corte<0||i<corte){ corte=i; largo=v.length; conPronombre=/lo$|la$|los$|me$/.test(v) }
+  }
   if(corte<0) return null
   let objetivo=bruto.slice(corte+largo).trim()
     .replace(/^(el|la|los|las|un|una)\s+/i,'')
     .replace(/^(programa|aplicaci[oó]n|app|cliente|ventana)\s+(de\s+)?/i,'')
     .replace(/\s+(ahora|ya|porfa|por favor)$/i,'')
     .replace(/[.?!,]+$/,'').trim()
+  // "cierralo ahora" no nombra nada: se refiere a lo ultimo que abrimos.
+  if(conPronombre||!objetivo||/^(eso|esto|aquello|ahora|ya)$/i.test(objetivo)){
+    const ult=loadState().ultimoAbierto
+    if(!ult||!ult.objetivo) return 'No sé qué cerrar: dime el nombre del programa'
+    objetivo=ult.objetivo
+    log('[pc] "ciérralo" -> último abierto: '+objetivo)
+  }
   if(!objetivo||objetivo.length>60) return null
   const clave=objetivo.toLowerCase()
   // nombre del ejecutable: app conocida, o el destino real del acceso directo
