@@ -30,15 +30,8 @@ function publishTerminalState(state, extra = {}) {
   } catch {}
 }
 const MODEL_OPTIONS = [
-  'gpt-5.6',
-  'opus-5',
-  'claude-opus-5',
-  'kimi-k3',
-  'fireworks-kimi-k3',
-  'orange-mousse',
-  'olive-jellyroll',
-  'orchid-muffin',
-  'oval-kumquat-medium'
+  'opus 5', 'gpt 5.6', 'opus 4.8', 'kimi k3',
+  'sonnet 5', 'grok 4.6', 'glm 5.2'
 ]
 const COMMANDS = [
   '/ayuda','/cuenta','/quien','/conectar','/lista','/usar','/sig','/estado','/uso','/salud','/crear-lote','/estados','/plan','/rotacion','/descubrir','/discover','/nueva-cuenta','/nuevo-workspace','/pool','/popup','/proxy','/salir',

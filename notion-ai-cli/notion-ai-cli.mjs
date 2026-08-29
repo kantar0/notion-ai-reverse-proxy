@@ -38,13 +38,17 @@ const MCP_ENSURE_SCRIPT = path.join(DIR, 'ensure-mcp-connection.mjs')
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const DEFAULT_MODE = 'hidden'
 const MODEL_DEFINITIONS = [
-  { id:'gpt-5.6', label:'GPT-5.6', aliases:['gpt-5.6','gpt 5.6','gpt56'] },
-  { id:'claude-opus-5', label:'Opus 5', aliases:['claude-opus-5','opus-5','opus 5','opus5'] },
-  { id:'fireworks-kimi-k3', label:'Kimi K3', aliases:['fireworks-kimi-k3','kimi-k3','kimi k3','kimik3'] },
-  { id:'orange-mousse', label:'Orange Mousse', aliases:['orange-mousse','orange mousse'] },
-  { id:'olive-jellyroll', label:'Olive Jellyroll', aliases:['olive-jellyroll','olive jellyroll'] },
-  { id:'orchid-muffin', label:'Orchid Muffin', aliases:['orchid-muffin','orchid muffin'] },
-  { id:'oval-kumquat-medium', label:'Oval Kumquat Medium', aliases:['oval-kumquat-medium','oval kumquat medium'] }
+  // codenames REALES de Notion (getAvailableModels 2026-08-29). El 'id' es el
+  // codename que espera runInferenceTranscript; sin el correcto, Notion ignora
+  // la preferencia y usa su modelo por defecto.
+  { id:'agave-flan', label:'Opus 5', aliases:['opus-5','opus 5','opus5','claude-opus-5','agave-flan'] },
+  { id:'orange-mousse', label:'GPT-5.6', aliases:['gpt-5.6','gpt 5.6','gpt56','gpt-5.6-sol','orange-mousse'] },
+  { id:'ambrosia-tart-high', label:'Opus 4.8', aliases:['opus-4.8','opus 4.8','opus48','ambrosia-tart-high'] },
+  { id:'fireworks-kimi-k3', label:'Kimi K3', aliases:['kimi-k3','kimi k3','kimik3','fireworks-kimi-k3'] },
+  // Extras disponibles, por si los quieres:
+  { id:'angel-cake-high', label:'Sonnet 5', aliases:['sonnet-5','sonnet 5','sonnet5','angel-cake-high'] },
+  { id:'soursop-shortcake', label:'Grok 4.6', aliases:['grok-4.6','grok 4.6','grok46','soursop-shortcake'] },
+  { id:'baseten-glm-5.2', label:'GLM 5.2', aliases:['glm-5.2','glm 5.2','glm52','baseten-glm-5.2'] },
 ]
 function normalizeModelInput(value){return String(value||'').trim().toLowerCase().replace(/[_]+/g,'-').replace(/\s+/g,' ')}
 function resolveModel(value){
@@ -1758,7 +1762,7 @@ function extractHiddenError(raw){
   return candidates.find(x=>!/^http\s*200$/i.test(x))||''
 }
 
-function buildHiddenRunExpression(userText, hiddenContext, model = 'gpt-5.6') {
+function buildHiddenRunExpression(userText, hiddenContext, model = 'orange-mousse') {
   return [
     '(async function runHidden() {',
     '  try {',
@@ -1797,7 +1801,7 @@ function buildHiddenRunExpression(userText, hiddenContext, model = 'gpt-5.6') {
 async function runHiddenPrompt(cdp, userText, progress=()=>{}) {
   const reqId = Math.random().toString(36).slice(2, 10)
   const hiddenContext = buildScopedPrompt(userText, reqId)
-  const { activeModel: model = 'gpt-5.6' } = loadState()
+  const { activeModel: model = 'orange-mousse' } = loadState()
   let lastErr
   for (let attempt = 1; attempt <= 2; attempt++) {
     let heartbeat
@@ -3888,7 +3892,7 @@ async function getStatus(fast=false) {
   const activeAccount=fast
     ? mergeKnownAccountDetails(s.lastActiveAccount||s.lastSelectedAccount||s.lastConnectedAccount||{})
     : await getActiveAccount()
-  return{version:VERSION,runMode:s.runMode||DEFAULT_MODE,lastMode:s.lastMode||null,activeAccount,selectedChatUrl:s.selectedChatUrl||null,selectedChatTitle:s.selectedChatTitle||null,selectedAccountKey:s.selectedAccountKey||null,autoRotateAccounts:getAutoRotateAccounts(),connectedAccountsCount:listConnectedAccounts().length,activeProject:s.activeProject||null,activeCwd:s.activeCwd||DIR,activeModel:s.activeModel||'gpt-5.6',memoryChars:m.length,memoryPreview:m.slice(0,500)}
+  return{version:VERSION,runMode:s.runMode||DEFAULT_MODE,lastMode:s.lastMode||null,activeAccount,selectedChatUrl:s.selectedChatUrl||null,selectedChatTitle:s.selectedChatTitle||null,selectedAccountKey:s.selectedAccountKey||null,autoRotateAccounts:getAutoRotateAccounts(),connectedAccountsCount:listConnectedAccounts().length,activeProject:s.activeProject||null,activeCwd:s.activeCwd||DIR,activeModel:(resolveModel(s.activeModel||'orange-mousse')||{}).label||'GPT-5.6',memoryChars:m.length,memoryPreview:m.slice(0,500)}
 }
 let serial=Promise.resolve()
 function enqueue(task){const p=serial.then(task,task);serial=p.catch(()=>{});return p}
