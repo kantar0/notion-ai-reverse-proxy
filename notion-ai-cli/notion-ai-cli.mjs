@@ -935,13 +935,20 @@ function buildVisiblePrompt(userText) {
   const{activeProject=''}=loadState(); const task=compactText(userText)
   return activeProject.trim()?`Proyecto activo: ${activeProject.trim()}\nSolicitud puntual: ${task}`:`Solicitud puntual: ${task}`
 }
+// Prompt CORTO para conversacion: si la peticion no pide nada del PC, no se le
+// ofrecen herramientas. Con el prompt completo, un simple "hey" le hacia
+// responder con ordenes EJECUTAR que el CLI ignora pero que el panel muestra
+// como actividad, y parecia que el saludo disparaba comandos.
+const PREFIJO_CHARLA = `MODO CLI SHOSSO. Responde únicamente en la terminal, en español, texto plano, breve y directo. `+
+  `Esto es una conversación normal: NO escribas ordenes EJECUTAR ni comandos, solo contesta. `+
+  `No crees páginas ni artefactos de Notion salvo petición explícita.`
 function buildScopedPrompt(userText, reqId) {
   const state=loadState()
   const workspaceMemory=buildWorkspaceMemoryPack().trim().slice(0,8000)
   const memory=readLocalMemory().trim().slice(0,4000)
   const transcript=readRecentTranscript(3000).trim()
   return [
-    BASE_PREFIX,'',
+    pidePc(userText)?BASE_PREFIX:PREFIJO_CHARLA,'',
     '=== INICIO DE CONTEXTO DE SESIÓN CLI ===',' ',
     'PROYECTO ACTIVO:',state.activeProject||'(sin proyecto activo)',
     'CARPETA DE TRABAJO:',state.activeCwd||DIR,'',
