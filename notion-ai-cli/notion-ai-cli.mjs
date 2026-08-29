@@ -2380,6 +2380,27 @@ async function runHiddenPromptWithRotation(userText,progress=()=>{}){
 // Notion pide la accion, el CLI la ejecuta contra el servidor MCP del PC y le
 // devuelve el resultado. Es la vuelta al bloqueo de Notion a los MCP propios:
 // el servidor responde perfecto por HTTP, solo falla cuando lo llama Notion.
+// ¿La peticion del usuario justifica tocar el PC? Un "hey" no puede acabar
+// ejecutando MinimizeAll porque el hilo arrastre una orden de hace tres
+// mensajes: si no pidio nada del sistema, las ordenes EJECUTAR se ignoran.
+function pidePc(texto){
+  const t=String(texto||'').toLowerCase()
+  if(t.trim().length<3) return false
+  // Por palabras, no por una expresion larga: la version con regex casaba con
+  // cualquier cosa (hasta con "hey") y dejaba pasar ordenes que el hilo
+  // arrastraba de mensajes anteriores.
+  const CLAVES=['abre','abrir','abrelo','abrela','lanza','ejecuta','inicia','corre','arranca',
+    'cierra','cerrar','cierralo','cierrala','mata','termina','finaliza','minimiza','maximiza','restaura',
+    'lee','leer','escribe','escribir','crea','crear','guarda','guardar','borra','borrar','elimina',
+    'mueve','mover','renombra','busca','buscar','lista','listar','muestra','mostrar',
+    'carpeta','archivo','fichero','escritorio','desktop','disco','proceso','puerto','comando',
+    'powershell','instala','descarga','captura','pantalla','ventana','programa','aplicacion',
+    'cuantos','cuantas','ram','cpu','memoria']
+  const palabras=t.split(/[^a-z0-9áéíóúñ]+/i).filter(Boolean)
+  if(palabras.some(p=>CLAVES.some(k=>p.startsWith(k)))) return true
+  // rutas escritas a mano: ~/algo, C:\\algo, ./algo
+  return /~[/\\\\]|[a-z]:[/\\\\]|[.][/]/i.test(t)
+}
 function extraerOrden(texto){
   const t=String(texto||'')
   const m=t.match(/EJECUTAR\s*(\{[\s\S]*\})/i)
@@ -2808,7 +2829,13 @@ async function processPrompt(userText, progress=()=>{}) {
     // Bucle de herramientas: como mucho 5 pasos, para que un malentendido no
     // encadene ordenes sin fin.
     for(let paso=1;paso<=5;paso++){
-      const orden=extraerOrden(respuesta)
+      const orden=pidePc(userText)?extraerOrden(respuesta):null
+      if(!orden&&/EJECUTAR/i.test(String(respuesta||''))&&!pidePc(userText)){
+        log('[puente] la petición no pedía nada del PC; ignoro la orden que arrastra el hilo')
+        respuesta=await runHiddenPromptWithRotation(
+          'NO ejecutes nada: la petición no lo pide. Responde normalmente a: '+userText,progress)
+        break
+      }
       // El modelo repite la MISMA orden una y otra vez aunque ya le hayamos dado
       // el resultado (se vieron 5 vueltas con "cmd /c start chrome"). Repetirla
       // no aporta: se corta y se le exige la respuesta con lo que ya tiene.
