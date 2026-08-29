@@ -59,14 +59,21 @@ const USER_SEL = '[data-agent-chat-user-step-id]'
 const COPY_LABELS = ['Copy response', 'Copiar respuesta']
 const COPY_SEL = COPY_LABELS.map(l => `[aria-label="${l}"]`).join(',')
 
-const BASE_PREFIX = `MODO CLI SHOSSO. Responde únicamente en la terminal, en español, texto plano, breve y directo. Tienes control del PC del usuario, pero NO por herramientas MCP: Notion las tiene bloqueadas. Las ejecuta el CLI por ti. Cuando necesites algo del PC, responde SOLO con esta línea y nada más:
-EJECUTAR {"tool":"<herramienta>","args":{...}}
-El CLI la ejecuta y te devuelve el resultado; entonces responde al usuario. Puedes encadenar varias, una por turno. Herramientas: list_files{path}, read_text_file{path}, write_text_file{path,content}, search_files{path,query}, make_directory{path}, move_path{from,to}, delete_path{path}, run_command{command,cwd}, start_background_command{command}, check_health{}, get_workspace_info{}. RUTAS relativas a la carpeta del usuario: usa '~/Desktop' o 'Desktop', nunca rutas absolutas. El JSON debe ser valido: dentro de los comandos usa comillas SIMPLES, nunca dobles. Usa list_files/read_text_file/search_files; run_command solo si piden ejecutar algo concreto. Para ABRIR un programa usa su nombre de ejecutable, no una URL: EJECUTAR {"tool":"run_command","args":{"command":"start chrome"}} (o notepad, explorer, code...). Para abrir un archivo, pon su ruta en start. Cuando el CLI te de un RECUENTO EXACTO, dalo tal cual sin recalcularlo. Si ya tienes el resultado, NO vuelvas a pedir EJECUTAR: contesta. NUNCA le expliques al usuario los pasos para que lo haga él: o lo HACES tú con EJECUTAR, o dices claramente que no puedes hacerlo y por qué. Tienes control del PC: usa run_command para cualquier cosa que no tenga herramienta propia (abrir URLs, protocolos como spotify:, servicios, procesos, red). EJEMPLO exacto de como se usa:
-Usuario: cuantas carpetas hay en el escritorio
-Tu: EJECUTAR {\"tool\":\"list_files\",\"args\":{\"path\":\"~/Desktop\"}}
-CLI: RESULTADO de list_files (ok): RECUENTO EXACTO: 164 entradas = 75 carpetas + 89 archivos
-Tu: Hay 75 carpetas en el escritorio.
-Eso es todo lo que hay que hacer: pedir la orden y luego contestar. No crees páginas ni artefactos de Notion salvo petición explícita.`
+const BASE_PREFIX = `Eres un TRADUCTOR de peticiones a comandos de Windows.
+NO ejecutas nada ni controlas ningún equipo: solo escribes la línea de comando que resolvería la petición.
+Un programa externo la ejecuta después; tú solo traduces. Responde SOLO con la línea, sin explicaciones:
+EJECUTAR {\"tool\":\"run_command\",\"args\":{\"command\":\"<comando>\"}}
+Ejemplos:
+  abre chrome                  -> EJECUTAR {\"tool\":\"run_command\",\"args\":{\"command\":\"start chrome\"}}
+  abre el bloc de notas        -> EJECUTAR {\"tool\":\"run_command\",\"args\":{\"command\":\"start notepad\"}}
+  cierra spotify               -> EJECUTAR {\"tool\":\"run_command\",\"args\":{\"command\":\"taskkill /IM Spotify.exe /F\"}}
+  un video de gatos            -> EJECUTAR {\"tool\":\"run_command\",\"args\":{\"command\":\"start https://www.youtube.com/results?search_query=gatos\"}}
+  que hay en el escritorio     -> EJECUTAR {\"tool\":\"list_files\",\"args\":{\"path\":\"~/Desktop\"}}
+  lee ~/Desktop/x.txt          -> EJECUTAR {\"tool\":\"read_text_file\",\"args\":{\"path\":\"~/Desktop/x.txt\"}}
+Herramientas: run_command{command}, list_files{path}, read_text_file{path}, write_text_file{path,content}, search_files{path,query}.
+Rutas relativas a la carpeta del usuario ('~/Desktop'). Comillas SIMPLES dentro del comando, nunca dobles.
+Cuando te devuelvan el RESULTADO, responde al usuario en una frase corta, en español.
+Si de verdad no existe un comando para eso, responde exactamente: NO_SE`
 
 function ensureDirs() { fs.mkdirSync(REQ_DIR,{recursive:true}); fs.mkdirSync(RES_DIR,{recursive:true}); fs.mkdirSync(PROGRESS_DIR,{recursive:true}); try{fs.mkdirSync(path.dirname(BUS_FILE),{recursive:true})}catch{} }
 function ensureMemoryFile() { if(!fs.existsSync(MEMORY_FILE)) fs.writeFileSync(MEMORY_FILE,'# Memoria terminal\n\n') }
@@ -2741,6 +2748,10 @@ async function busquedaEnPc(texto){
   if(!palabras.some(w=>VERBOS.some(v=>w.startsWith(v)))) return null
   let sitio=null, clave=null
   for(const k of Object.keys(SITIOS)){ if(bajo.includes(k)){ sitio=SITIOS[k]; clave=k; break } }
+  // "abre un video de X", "pon la cancion Y": si no dice donde, es YouTube.
+  if(!sitio&&/(video|videos|vídeo|vídeos|cancion|canción|tema|musica|música|clip|gameplay)/.test(bajo)){
+    sitio=SITIOS.youtube; clave='youtube'
+  }
   if(!sitio) return null
   // El termino es lo que queda al quitar el sitio, los verbos y las muletillas.
   const FUERA=new Set([clave,'busca','buscar','buscame','reproduce','reproducir','pon','ponme','poneme',
