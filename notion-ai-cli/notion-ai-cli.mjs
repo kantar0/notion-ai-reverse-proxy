@@ -103,6 +103,10 @@ este chat lo convierte en fórmula y el comando llega roto. Se puede evitar siem
   Sort-Object -Property Nombre             y Select-Object -Property, -First, -ExpandProperty
 Escribe la línea EJECUTAR UNA sola vez y solo para lo que te acaban de pedir.
 Cuando te devuelvan el RESULTADO, responde al usuario en una frase corta, en español.
+RESPONDE A LA PRIMERA. No busques en Notion ni explores el espacio de trabajo: lo que te piden
+está en el PC, no en tus páginas. No razones en voz alta ni des rodeos: escribe directamente la
+línea EJECUTAR con el mejor comando que se te ocurra. Si no acierta, te pasaremos el error y lo
+corriges; probar cuesta menos que pensarlo.
 Si lo que te dicen NO necesita el equipo (un saludo, una charla, una pregunta general),
 contesta con normalidad y SIN ninguna línea EJECUTAR.
 NO_SE es solo para lo que un equipo no puede saber ni hacer de ninguna manera: si se puede
@@ -768,6 +772,7 @@ function clasificarAviso(texto){
 
 function isQuotaErrorMessage(message){
   const text=String(message||'')
+  if(/CLIENTE ABANDONADO/.test(text)) return false   // no es culpa del workspace
   return /No pude escribir el prompt|sin cupo o créditos|se quedó sin avanzar|trial ai allowance|Notion Credits|premium-feature-unavailable|Chat limit exceeded|AI DESHABILITADA|AI disabled|No pude sincronizar la cuenta y el thread|MCP no disponible|Failed to connect to MCP server|HTTP 404|mcpServer_pc211/i.test(text)
 }
 function findPremiumFeatureNode(value,depth=0){
@@ -2144,12 +2149,16 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
   const limite=Date.now()+4*60_000
   let estable=0, ultimo='', vistos=new Set(), reenvios=0, atascos=0, huellaPrevia='', ultimoCambio=Date.now()
   let arranco=false, envioEn=Date.now(), lecturasMuertas=0, vueltas=0
+  // Ctrl+C en el cliente: no tiene sentido seguir ocupando el navegador (y el
+  // cupo) por una respuesta que ya no va a leer nadie.
+  const duenoSeFue=()=>peticionEnCurso&&!clienteVivo(peticionEnCurso)
   let marcaConfirmada=false
   const esAccion=pidePc(String(promptText||'').replace(/^[\s\S]*SOLICITUD DEL USUARIO:/,''))
   // Cada lectura con tope propio: si el navegador deja de contestar, la petición
   // se quedaba colgada sin poder ni comprobar su propio límite de 10 minutos.
   const conTope=(p,ms,alt)=>Promise.race([p,new Promise(r=>setTimeout(()=>r(alt),ms))])
   while(Date.now()<limite){
+    if(duenoSeFue()) throw new Error('CLIENTE ABANDONADO: quien pidió esto cerró el CLI')
     const s=await conTope(chatSnapshot(cdp,marcaEnvio),20000,{failed:true})
     // Latido: sin esto, cuando el bucle se quedaba esperando no habia forma de
     // saber que veia (ni si seguia vivo).
@@ -3689,7 +3698,17 @@ async function getStatus(fast=false) {
 let serial=Promise.resolve()
 function enqueue(task){const p=serial.then(task,task);serial=p.catch(()=>{});return p}
 
+// Si el cliente que pidió esto ya no existe (Ctrl+C), seguir trabajando solo
+// sirve para tener la cola ocupada: el siguiente CLI se queda en "trabajando"
+// esperando un turno que no llega.
+let peticionEnCurso=null
+function clienteVivo(req){
+  const pid=Number(req&&req.clientPid)
+  if(!pid) return true                       // peticiones sin PID: no se tocan
+  try{ process.kill(pid,0); return true }catch{ return false }
+}
 async function handleBridgeRequest(workingPath,req){
+  peticionEnCurso=req
   const responsePath=path.join(RES_DIR,`${req.id}.json`)
   const progressBase=createProgressEmitter(req)
   // Quien pregunta desde Discord sólo veía silencio hasta la respuesta final: el
@@ -3886,7 +3905,15 @@ async function drainBridgeQueue(){
       try{fs.renameSync(src,wrk)}catch{continue}
       let req;try{req=JSON.parse(fs.readFileSync(wrk,'utf8'))}catch(e){try{fs.writeFileSync(path.join(RES_DIR,`${path.basename(name,'.json')}.json`),JSON.stringify({ok:false,error:`JSON invalido: ${e.message}`},null,2))}catch{};try{fs.unlinkSync(wrk)}catch{};continue}
       if(isLightRequest(req)) handleBridgeRequest(wrk,req).catch(e=>log(`light req err: ${e.message}`))
-      else enqueue(()=>handleBridgeRequest(wrk,req))
+      else enqueue(()=>{
+        // Al llegarle el turno puede que quien la pidió ya se haya ido.
+        if(!clienteVivo(req)){
+          log('[cola] el cliente de '+String(req.id).slice(-8)+' ya no está; descarto su petición')
+          try{fs.unlinkSync(wrk)}catch{}
+          return Promise.resolve()
+        }
+        return handleBridgeRequest(wrk,req)
+      })
     }
   }finally{draining=false}
 }

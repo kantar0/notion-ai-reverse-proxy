@@ -88,7 +88,9 @@ async function sendRequest(payload, onProgress = null) {
   fs.mkdirSync(REQ_DIR, { recursive: true })
   fs.mkdirSync(RES_DIR, { recursive: true })
   const id = `${Date.now()}-${randomUUID()}`
-  const req = { id, createdAt: new Date().toISOString(), ...payload }
+  // El PID viaja con la peticion: si matas el cliente (Ctrl+C), el daemon lo ve
+  // y cancela en vez de seguir ocupando la cola con una peticion sin dueño.
+  const req = { id, createdAt: new Date().toISOString(), clientPid: process.pid, ...payload }
   const tmpPath = path.join(REQ_DIR, `${id}.tmp`)
   const reqPath = path.join(REQ_DIR, `${id}.json`)
   const resPath = path.join(RES_DIR, `${id}.json`)

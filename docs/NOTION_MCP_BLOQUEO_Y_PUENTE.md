@@ -81,6 +81,16 @@ Notion:  "Archivo creado en ~/Desktop/x.txt"
 Funciona, pero el modelo es **irregular**: a veces ejecuta y a veces responde "no tengo
 acceso a tu PC" a la misma petición, con el mismo prompt. De ahí que exista el camino A.
 
+### Un Ctrl+C en la terminal no cancela nada por sí solo
+
+La cola es serializada (un único navegador), así que si matas el cliente mientras Notion trabaja, el
+daemon sigue con esa petición hasta agotar su límite y **el siguiente CLI se queda en "trabajando"**
+esperando un turno que tarda minutos en llegar. El cliente no puede avisar de su propia muerte, así
+que manda su **PID** dentro de la petición: el daemon comprueba si ese proceso sigue vivo antes de
+darle turno y también mientras espera la respuesta, y la descarta en cuanto desaparece. Ese abandono
+no debe contarse como fallo del workspace, o acabarías tachando espacios buenos por haber pulsado
+Ctrl+C.
+
 ### Dos cosas que ensucian la respuesta y no son errores tuyos
 
 **PowerShell devuelve su barra de progreso como XML.** Al capturar stderr te llega
