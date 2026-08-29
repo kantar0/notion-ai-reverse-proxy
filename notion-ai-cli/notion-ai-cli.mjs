@@ -1216,6 +1216,22 @@ async function insertPrompt(cdp,text){
       return JSON.parse(String(raw||'{}')).t===true
     }catch{ return true }
   }
+  // Devuelve el aviso de limite SOLO si el boton de enviar esta inerte: con el
+  // boton vivo, un cartel de "upgrade" suelto en la pagina no impide enviar.
+  async function avisoDeCupo(){
+    // El patron se aplica AQUI, no dentro de la pagina: interpolarlo en un
+    // literal /regex/ rompia el JS evaluado (SyntaxError) y la deteccion nunca
+    // llegaba a correr.
+    const raw=await cdp.evaluate(`(()=>{
+      const b=document.querySelector('[data-testid="agent-send-message-button"],[aria-label="Submit AI message"]');
+      if(!b||!(b.disabled||b.getAttribute('aria-disabled')==='true')) return '[]';
+      const t=(document.body&&document.body.innerText)||'';
+      return JSON.stringify(t.split(String.fromCharCode(10)).map(x=>x.trim()).filter(Boolean).slice(0,300));
+    })()`).catch(()=>'[]')
+    let lineas=[]; try{ lineas=JSON.parse(String(raw||'[]')) }catch{}
+    const re=new RegExp(QUOTA_TEXT_PATTERN,'i')
+    return String(lineas.find(x=>re.test(x))||'').slice(0,140)
+  }
   async function submitPrompt(){
     // Notion habilita el boton de enviar un instante despues de recibir el
     // texto: pulsarlo de inmediato no hace nada, asi que se espera y se
@@ -1225,6 +1241,11 @@ async function insertPrompt(cdp,text){
       await submitOnce()
       await sleep(1500)
       if(!(await composerHasText())) return true
+      // Sin cupo, Notion deja escribir pero DESHABILITA el boton: el texto se
+      // queda en el composer y la peticion no llega a publicarse nunca. Antes
+      // se reintentaba en bucle; ahora se corta y se rota de workspace.
+      const aviso=await avisoDeCupo()
+      if(aviso) throw new Error('Notion AI sin cupo o créditos en este workspace: '+aviso)
       log('[submit] el composer sigue con texto; reintento '+(intento+1))
       await sleep(1200)
     }
@@ -1250,7 +1271,8 @@ async function insertPrompt(cdp,text){
         ]
         for(const step of steps) await cdp.call('Input.dispatchMouseEvent',{x:box.x,y:box.y,...step}).catch(e=>log('[submit] clic falló: '+e.message))
         log('[submit] botón de enviar pulsado en '+box.x+','+box.y)
-        return true
+        if(await seVacio()) return true
+        log('[submit] el clic no publicó: sigue escrito. Reintento con Enter')
       }
       log('[submit] no encontré el botón de enviar; uso Enter')
     }catch(error){ log('[submit] error localizando el botón: '+error.message) }
@@ -1258,10 +1280,30 @@ async function insertPrompt(cdp,text){
     // interfaz antigua; en la nueva Notion lo ignora).
     await cdp.call('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13,text:'\r',unmodifiedText:'\r'}).catch(()=>{})
     await cdp.call('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13}).catch(()=>{})
+    return await seVacio()
+  }
+  // Que el composer quede VACIO es la unica senal de que Notion acepto el
+  // mensaje. Sin esto, un clic que React descarta deja el prompt escrito y el
+  // CLI espera una respuesta que nunca va a llegar ("no llegó a publicarse").
+  async function seVacio(){
+    for(let i=0;i<12;i++){
+      await sleep(500)
+      const t=String((await surface().catch(()=>({current:'?'}))).current||'').replace(/\s+/g,' ').trim()
+      if(!t) return true
+    }
     return false
+  }
+  // Sin cupo, Notion NO quita siempre el composer: a veces lo deja escribir y
+  // solo deshabilita el boton de enviar ("You've run out of free AI responses").
+  // Sin mirar el boton, el CLI reescribia y repulsaba en bucle y la peticion
+  // nunca llegaba a publicarse en el chat.
+  async function botonInerte(){
+    const raw=await cdp.evaluate(`(()=>{const b=document.querySelector('[data-testid="agent-send-message-button"],[aria-label="Submit AI message"]');return JSON.stringify(b?!!(b.disabled||b.getAttribute('aria-disabled')==='true'):false)})()`).catch(()=>'false')
+    return String(raw).includes('true')
   }
   for(let attempt=0;attempt<6;attempt++){
     let s=await surface()
+    if(s.allowance&&await botonInerte()) throw new Error('Notion AI sin cupo o créditos en este workspace: '+String(s.allowance).slice(0,120))
     if(!s.hasInput&&s.hasStart){
       await clickNewChat().catch(()=>false)
       await sleep(1500)
@@ -1306,16 +1348,16 @@ async function insertPrompt(cdp,text){
     let cur=String((await surface()).current||'').replace(/\s+/g,' ').trim()
     log('[insert] intento '+attempt+' · composer="'+cur.slice(0,60)+'" · esperado="'+expected.slice(0,60)+'"')
     if(cur===expected||cur.startsWith(expected.slice(0,60))){
-      await submitPrompt()
-      return
+      if(await submitPrompt()) return
+      await sleep(400); continue
     }
     const wrote=await directWrite()
     if(!wrote){await sleep(350);continue}
     await sleep(400)
     cur=String((await surface()).current||'').replace(/\s+/g,' ').trim()
     if(cur===expected||cur.startsWith(expected.slice(0,60))){
-      await submitPrompt()
-      return
+      if(await submitPrompt()) return
+      await sleep(400); continue
     }
     await sleep(350)
   }
@@ -2558,6 +2600,23 @@ function comandoDeApertura(comando){
   if(args) args=String(args).trim().replace(/^["']+|["']+$/g,'').trim()||null
   return prog?{prog,args}:null
 }
+async function existeComando(nombre){
+  const n=String(nombre).replace(/["']/g,'').trim()
+  if(!n||/[\/]/.test(n)) return false
+  const guion=[
+    '$n=' + JSON.stringify(n),
+    'if(Get-Command $n -ErrorAction SilentlyContinue){"SI";exit}',
+    'foreach($r in @("HKLM:","HKCU:")){',
+    '  $p=Join-Path $r ("SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\\" + $n + ".exe")',
+    '  if(Test-Path $p){"SI";exit}',
+    '}',
+    '"NO"',
+  ].join(String.fromCharCode(10))
+  try{
+    const r=await psEval(guion,15000)
+    return /\bSI\b/.test(String((r&&r.texto)||r||''))
+  }catch{ return false }
+}
 function abrirLocal(objetivo,cwd,argumentos,reintentado){
   return new Promise(resolve=>{
     // Se COMPRUEBA que la ventana existe de verdad: dar por bueno el lanzamiento
@@ -2607,10 +2666,17 @@ function abrirLocal(objetivo,cwd,argumentos,reintentado){
       // Spotify no se registra ahi). La IA acerto con la intencion; el CLI se
       // encarga de encontrar el programa y reintentar con su ruta real.
       if(!reintentado&&!/[\/]/.test(String(objetivo))){
-        buscarPrograma(String(objetivo)).then(ruta=>{
-          if(!ruta) return resolve({ok:false,texto:'no encontré "'+objetivo+'" en este equipo'})
-          log('[pc] "'+objetivo+'" no estaba en el PATH; lo abro desde '+ruta)
-          resolve(abrirLocal(ruta,cwd,argumentos,true))
+        // Ojo: muchos programas arrancan con OTRO nombre de proceso ("calc"
+        // levanta CalculatorApp), asi que no verlo no significa que fallara.
+        // Solo se busca cuando el nombre NO existe en el equipo, como pasa con
+        // Spotify, que no se registra en el PATH.
+        existeComando(String(objetivo)).then(existe=>{
+          if(existe) return resolve({ok:true,texto:'abierto: '+objetivo})
+          return buscarPrograma(String(objetivo)).then(ruta=>{
+            if(!ruta) return resolve({ok:false,texto:'no encontré "'+objetivo+'" en este equipo'})
+            log('[pc] "'+objetivo+'" no estaba en el PATH; lo abro desde '+ruta)
+            resolve(abrirLocal(ruta,cwd,argumentos,true))
+          })
         }).catch(()=>resolve({ok:false,texto:'no pude abrir '+objetivo}))
         return
       }

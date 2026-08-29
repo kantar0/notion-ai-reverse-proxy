@@ -151,6 +151,18 @@ agotado dice *"wait until <fecha> for it to reset"* y parece que la cuenta enter
 seca. Es falso: en esa misma cuenta, **un workspace nuevo del plan Free nace con cupo**.
 Mide siempre espacio por espacio.
 
+**Sin cupo NO siempre desaparece el campo de escritura.** Notion te deja escribir y sólo
+**deshabilita el botón de enviar**, con el aviso arriba del todo: *"You've run out of free AI
+responses"*. Si sólo compruebas que existe el composer, el texto se queda escrito, se repulsa
+en bucle y **la petición nunca llega a publicarse** — que es justo como lo ve el usuario. La
+señal fiable es el botón: `disabled` o `aria-disabled="true"` → sin cupo → rota ya.
+
+**El programa abierto casi nunca se llama como el comando.** `calc` levanta `CalculatorApp`,
+así que buscar un proceso con el nombre del comando da falsos "no abrió". Comprueba si el
+comando **existe** (PATH + `App Paths` del registro) antes de darlo por fallido; sólo cuando
+de verdad no existe (caso de Spotify) hay que buscar el ejecutable y reintentar con su ruta.
+Ese respaldo aporta el *cómo*, nunca decide el *qué*.
+
 **Las pestañas se acumulan y Edge se come la RAM.** Cada rotación o precalentado abre una
 pestaña; con 21 abiertas el motor llegó a **4,4 GB**. `tabs-clean.mjs` deja una y el
 daemon lo lanza tras cada petición; con los límites de `start-notion-cdp.ps1`
