@@ -61,7 +61,7 @@ const COPY_SEL = COPY_LABELS.map(l => `[aria-label="${l}"]`).join(',')
 
 const BASE_PREFIX = `MODO CLI SHOSSO. Responde únicamente en la terminal, en español, texto plano, breve y directo. Tienes control del PC del usuario, pero NO por herramientas MCP: Notion las tiene bloqueadas. Las ejecuta el CLI por ti. Cuando necesites algo del PC, responde SOLO con esta línea y nada más:
 EJECUTAR {"tool":"<herramienta>","args":{...}}
-El CLI la ejecuta y te devuelve el resultado; entonces responde al usuario. Puedes encadenar varias, una por turno. Herramientas: list_files{path}, read_text_file{path}, write_text_file{path,content}, search_files{path,query}, make_directory{path}, move_path{from,to}, delete_path{path}, run_command{command,cwd}, start_background_command{command}, check_health{}, get_workspace_info{}. RUTAS relativas a la carpeta del usuario: usa '~/Desktop' o 'Desktop', nunca rutas absolutas. El JSON debe ser valido: dentro de los comandos usa comillas SIMPLES, nunca dobles. Usa list_files/read_text_file/search_files; run_command solo si piden ejecutar algo concreto. Para ABRIR un programa usa su nombre de ejecutable, no una URL: EJECUTAR {"tool":"run_command","args":{"command":"start chrome"}} (o notepad, explorer, code...). Para abrir un archivo, pon su ruta en start. Cuando el CLI te de un RECUENTO EXACTO, dalo tal cual sin recalcularlo. Si ya tienes el resultado, NO vuelvas a pedir EJECUTAR: contesta. EJEMPLO exacto de como se usa:
+El CLI la ejecuta y te devuelve el resultado; entonces responde al usuario. Puedes encadenar varias, una por turno. Herramientas: list_files{path}, read_text_file{path}, write_text_file{path,content}, search_files{path,query}, make_directory{path}, move_path{from,to}, delete_path{path}, run_command{command,cwd}, start_background_command{command}, check_health{}, get_workspace_info{}. RUTAS relativas a la carpeta del usuario: usa '~/Desktop' o 'Desktop', nunca rutas absolutas. El JSON debe ser valido: dentro de los comandos usa comillas SIMPLES, nunca dobles. Usa list_files/read_text_file/search_files; run_command solo si piden ejecutar algo concreto. Para ABRIR un programa usa su nombre de ejecutable, no una URL: EJECUTAR {"tool":"run_command","args":{"command":"start chrome"}} (o notepad, explorer, code...). Para abrir un archivo, pon su ruta en start. Cuando el CLI te de un RECUENTO EXACTO, dalo tal cual sin recalcularlo. Si ya tienes el resultado, NO vuelvas a pedir EJECUTAR: contesta. NUNCA le expliques al usuario los pasos para que lo haga él: o lo HACES tú con EJECUTAR, o dices claramente que no puedes hacerlo y por qué. Tienes control del PC: usa run_command para cualquier cosa que no tenga herramienta propia (abrir URLs, protocolos como spotify:, servicios, procesos, red). EJEMPLO exacto de como se usa:
 Usuario: cuantas carpetas hay en el escritorio
 Tu: EJECUTAR {\"tool\":\"list_files\",\"args\":{\"path\":\"~/Desktop\"}}
 CLI: RESULTADO de list_files (ok): RECUENTO EXACTO: 164 entradas = 75 carpetas + 89 archivos
@@ -2402,7 +2402,8 @@ function pidePc(texto){
     'mueve','mover','renombra','busca','buscar','lista','listar','muestra','mostrar',
     'carpeta','archivo','fichero','escritorio','desktop','disco','proceso','puerto','comando',
     'powershell','instala','descarga','captura','pantalla','ventana','programa','aplicacion',
-    'cuantos','cuantas','ram','cpu','memoria']
+    'cuantos','cuantas','ram','cpu','memoria',
+    've','vete','entra','navega','visita','carga','web','url','youtube','google','spotify']
   const palabras=t.split(/[^a-z0-9áéíóúñ]+/i).filter(Boolean)
   if(palabras.some(p=>CLAVES.some(k=>p.startsWith(k)))) return true
   // rutas escritas a mano: ~/algo, C:\\algo, ./algo
@@ -2639,6 +2640,32 @@ async function buscarPrograma(consulta){
   log('[buscar] '+q+' -> '+String(ruta||'(vacio)').slice(0,90))
   return (!ruta||ruta==='NADA')?null:ruta
 }
+// Abrir una direccion web: "ve a youtube.com", "abre chrome y ve a youtube.com".
+// Antes solo se abria el programa y la URL se perdia.
+function extraerUrl(texto){
+  const t=String(texto||'')
+  const m=t.match(/(https?:\/\/[^\s"']+|(?:www\.)?[a-z0-9-]+\.(?:com|net|org|es|io|tv|gg|dev|app|co)(?:\/[^\s"']*)?)/i)
+  if(!m) return null
+  let u=m[1].replace(/[.,;]+$/,'')
+  if(!/^https?:/i.test(u)) u='https://'+u
+  return u
+}
+async function webEnPc(texto){
+  const bruto=String(texto||'').trim(), bajo=bruto.toLowerCase()
+  const url=extraerUrl(bruto)
+  if(!url) return null
+  // Solo si de verdad se pide navegar, no si la direccion aparece de pasada.
+  if(!/(^|[^a-z])(ve|vete|entra|navega|abre|abrir|pon|carga|visita)([^a-z]|$)/.test(bajo)) return null
+  const nav = bajo.includes('chrome')?'chrome' : (bajo.includes('edge')?'msedge' : (bajo.includes('firefox')?'firefox':null))
+  const guion = nav
+    ? 'Start-Process -FilePath '+JSON.stringify(nav)+' -ArgumentList '+JSON.stringify(url)+'; "OK"'
+    : 'Start-Process '+JSON.stringify(url)+'; "OK"'
+  const r=await psEval(guion,20000)
+  log('[pc] web '+url+(nav?' en '+nav:'')+' -> '+(r.ok?'ok':'fallo '+String(r.texto||'').slice(0,60)))
+  saveState({ultimoObjetivo:nav||'navegador',version:VERSION})
+  return r.ok?('HECHO por el CLI: abierto '+url+(nav?' en '+nav:''))
+             :('NO se pudo abrir '+url+': '+String(r.texto||'').slice(0,150))
+}
 async function aperturaEnPc(texto){
   // Deteccion por palabras, no por una expresion larga: la version con regex
   // no casaba en ejecucion y fallaba en silencio.
@@ -2670,6 +2697,19 @@ async function aperturaEnPc(texto){
     log('[pc] pronombre -> último objetivo: '+objetivo)
   }
   if(!objetivo||objetivo.length>60) return null
+  // "pon human nature de michael jackson en spotify" NO es "abrir un programa":
+  // el atajo abria Spotify y se comia la cancion. Si la peticion trae mas que un
+  // nombre, se deja al camino general (el modelo con EJECUTAR), que puede usar
+  // protocolos como spotify:search:.
+  const palabrasObj=objetivo.split(/\s+/).filter(Boolean)
+  const bajoObj=objetivo.toLowerCase()
+  // Conocida solo si el objetivo ES el nombre del programa (o poco mas): asi
+  // "bloc de notas" sigue siendo un atajo y "human nature ... en spotify" no.
+  const conocida=!!APPS[bajoObj]||(palabrasObj.length<=3&&Object.keys(APPS).some(k=>bajoObj.includes(k)))
+  if(!conocida&&palabrasObj.length>3){
+    log('[pc] "'+objetivo.slice(0,40)+'" es más que un programa; lo dejo al modelo')
+    return null
+  }
   const clave=objetivo.toLowerCase()
   // 1) aplicacion conocida
   // 1) aplicacion conocida: se pasa el nombre TAL CUAL a Start-Process (antes se
@@ -2812,7 +2852,8 @@ async function processPrompt(userText, progress=()=>{}) {
     let ultimoResultado=null
     const ordenesVistas=new Set()
     // Si la peticion nombra una ruta, se resuelve YA y se le da hecha.
-    const ventana=await ventanaEnPc(userText).catch(e=>{log('[pc] ventana falló: '+String(e&&e.message||e).slice(0,120));return null})
+    const web=await webEnPc(userText).catch(e=>{log('[pc] web falló: '+String(e&&e.message||e).slice(0,120));return null})
+    const ventana=web||await ventanaEnPc(userText).catch(e=>{log('[pc] ventana falló: '+String(e&&e.message||e).slice(0,120));return null})
     const cerrado=ventana||await cierreEnPc(userText).catch(e=>{log('[pc] cierre falló: '+String(e&&e.message||e).slice(0,120));return null})
     const abierto=cerrado||await aperturaEnPc(userText).catch(e=>{log('[pc] apertura falló: '+String(e&&e.message||e).slice(0,120));return null})
     const escrito=abierto||await escrituraEnPc(userText).catch(e=>{log('[pc] escritura falló: '+String(e&&e.message||e).slice(0,120));return null})
