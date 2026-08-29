@@ -3975,7 +3975,7 @@ async function handleBridgeRequest(workingPath,req){
       saveState({spaceCreateBlockedBy:{},createBackoff:{},version:VERSION})
       const lanzado=lanzarPoolMaintain('forzado tras cambio de IP')
       result={ok:true,id:req.id,text:lanzado
-        ? 'Backoff reseteado. Intentando crear workspaces ahora (si cambiaste de IP y el 429 era por IP, ahora debería crear). Mira el log o usa /cupo en un minuto.'
+        ? 'Backoff reseteado. Reintentando crear workspaces ahora. NOTA: el 429 es por CUENTA (no por IP), así que esto solo crea si la ventana del rate-limit ya cedió o si añadiste una cuenta nueva. Mira /cupo en un minuto.'
         : 'Ya había un mantenimiento en marcha; el backoff quedó reseteado.'}
       log('FORCE_POOL '+req.id)
     }
