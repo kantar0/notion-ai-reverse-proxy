@@ -2505,10 +2505,25 @@ function comandoDeApertura(comando){
   const c=String(comando||'').trim()
   const m=c.match(/^(?:cmd(?:\.exe)?\s+\/c\s+)?start\s+(?:"[^"]*"\s+|''\s+)?(.+)$/i)
   if(!m) return null
-  let obj=m[1].trim().replace(/^["']|["']$/g,'').trim()
-  return obj||null
+  let resto=m[1].trim()
+  if(!resto) return null
+  // "start chrome https://..." son DOS cosas: programa y argumento. Tratarlo
+  // todo como nombre daba Start-Process -FilePath "chrome https://..." y
+  // "El sistema no puede encontrar el archivo".
+  let prog=null, args=null
+  const conComillas=resto.match(/^"([^"]+)"\s*(.*)$/)
+  if(conComillas){ prog=conComillas[1]; args=conComillas[2].trim()||null }
+  else {
+    const partes=resto.split(/\s+/)
+    prog=partes.shift()
+    args=partes.length?partes.join(' '):null
+    // Una ruta con espacios sin comillas: se toma entera si existe tal cual.
+    if(args&&/[\/]/.test(resto)&&!/^https?:/i.test(args)){ prog=resto; args=null }
+  }
+  prog=String(prog||'').replace(/^["']|["']$/g,'').trim()
+  return prog?{prog,args}:null
 }
-function abrirLocal(objetivo,cwd){
+function abrirLocal(objetivo,cwd,argumentos){
   return new Promise(resolve=>{
     // Se COMPRUEBA que la ventana existe de verdad: dar por bueno el lanzamiento
     // hacia que el CLI dijera "listo, ya esta abierto" sin haber abierto nada
@@ -2526,7 +2541,9 @@ function abrirLocal(objetivo,cwd){
       (esAcceso?('$sh=New-Object -ComObject WScript.Shell;'+
                  '$destino=$sh.CreateShortcut('+JSON.stringify(objetivo)+').TargetPath;'+
                  '$sonda=[System.IO.Path]::GetFileNameWithoutExtension($destino);'):'$sonda=$null;')+
-      'Start-Process -FilePath '+JSON.stringify(objetivo)+' -WorkingDirectory '+JSON.stringify(rutaReal(cwd||''))+';'+
+      'Start-Process -FilePath '+JSON.stringify(objetivo)+
+        (argumentos?' -ArgumentList '+JSON.stringify(String(argumentos)):'')+
+        ' -WorkingDirectory '+JSON.stringify(rutaReal(cwd||''))+';'+
       // Espera con reintentos: 3 s fijos daban falso negativo con aplicaciones
       // que tardan en arrancar (Spotify abria y se reportaba "fallo").
       ''+
@@ -2578,7 +2595,7 @@ function psEval(guion,topeMs=45000){
 }
 function ejecutarLocal(comando,cwd){
   const apertura=comandoDeApertura(comando)
-  if(apertura) return abrirLocal(apertura,cwd)
+  if(apertura) return abrirLocal(apertura.prog,cwd,apertura.args)
   return new Promise(resolve=>{
     const shell=process.env.ComSpec||'C:\Windows\System32\cmd.exe'
     const hijo=spawn(shell,['/d','/s','/c',String(comando)],
