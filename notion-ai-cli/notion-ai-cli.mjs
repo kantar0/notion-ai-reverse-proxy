@@ -2953,39 +2953,60 @@ async function processPrompt(userText, progress=()=>{}) {
     let ultimoResultado=null
     const ordenesVistas=new Set()
     // Si la peticion nombra una ruta, se resuelve YA y se le da hecha.
-    // Atajos ACTIVOS. Se probo dejarselo todo al modelo y no funciona: se niega
-    // en seco ("no tengo acceso directo ni control remoto de tu PC") aunque el
-    // prompt le explique que el CLI ejecuta por el. No son una lista de
-    // aplicaciones: son las operaciones frecuentes resueltas por el CLI para que
-    // no dependan de su humor. Todo lo demas sigue yendo por el modelo.
-    // Se pueden apagar con "atajosPc": false en cli-state.json.
+    // La IA interpreta PRIMERO. Los atajos del CLI quedan como RED DE
+    // SEGURIDAD: solo entran si ella se niega, no responde o no acierta con la
+    // orden. Antes iban delante y la IA casi nunca llegaba a decidir nada, que
+    // es justo lo contrario de lo que tiene sentido: el puente existe para que
+    // pueda usar el PC entero, no para ejecutar una lista de casos.
     const atajos=loadState().atajosPc!==false
-    const busqueda=atajos?await busquedaEnPc(userText).catch(e=>{log('[pc] búsqueda falló: '+String(e&&e.message||e).slice(0,120));return null}):null
-    const web=busqueda||(atajos?await webEnPc(userText).catch(e=>{log('[pc] web falló: '+String(e&&e.message||e).slice(0,120));return null}):null)
-    const ventana=web||(atajos?await ventanaEnPc(userText).catch(e=>{log('[pc] ventana falló: '+String(e&&e.message||e).slice(0,120));return null}):null)
-    const cerrado=ventana||(atajos?await cierreEnPc(userText).catch(e=>{log('[pc] cierre falló: '+String(e&&e.message||e).slice(0,120));return null}):null)
-    const abierto=cerrado||(atajos?await aperturaEnPc(userText).catch(e=>{log('[pc] apertura falló: '+String(e&&e.message||e).slice(0,120));return null}):null)
-    const escrito=abierto||(atajos?await escrituraEnPc(userText).catch(e=>{log('[pc] escritura falló: '+String(e&&e.message||e).slice(0,120));return null}):null)
-    // Una accion ya ejecutada (abrir, escribir) NO necesita que Notion redacte la
-    // confirmacion: el trabajo esta hecho y esperar a que conteste solo suma
-    // 30-60 s y el riesgo de que se cuelgue en su indicador de progreso.
-    if(abierto||escrito){
-      const hecho=String(abierto||escrito)
-      log('[pc] accion resuelta por el CLI; respondo sin esperar a Notion')
-      progress('complete','Hecho',{tool:'Terminal',action:'Completado'})
-      const limpio=hecho.replace(/^HECHO por el CLI:\s*/,'').replace(/^NO se pudo/,'No se pudo').trim()
-      appendTranscript('IA [cli]',limpio)
-      return limpio
+    async function redDeSeguridad(){
+      if(!atajos) return null
+      const intentos=[busquedaEnPc,webEnPc,ventanaEnPc,cierreEnPc,aperturaEnPc,escrituraEnPc]
+      for(const fn of intentos){
+        const r=await fn(userText).catch(e=>{log('[pc] '+fn.name+' falló: '+String(e&&e.message||e).slice(0,90));return null})
+        if(r) return r
+      }
+      return null
     }
-    const previo=escrito||await contextoDelPc(userText)
+    // Datos de solo lectura (una ruta mencionada) se adjuntan porque ayudan y no
+    // tienen efectos: la decision sigue siendo de la IA.
+    const previo=await contextoDelPc(userText).catch(()=>null)
     if(previo){
       progress('working','Leyendo tu PC',{tool:'Terminal',action:'Datos del PC'})
       ultimoResultado=previo
     }
-    let respuesta=await runHiddenPromptWithRotation(previo?(previo+String.fromCharCode(10,10)+'Con esos datos responde: '+userText):userText,progress)
+    let ejecutoAlgo=false
+    // La IA decide, pero no te hace esperar: si en 40 s no ha ejecutado nada,
+    // el CLI resuelve y responde. El flujo de la IA se marca como respondido
+    // para que no ejecute la accion por duplicado despues.
+    let yaRespondido=false
+    const carrera=pidePc(userText)&&atajos
+      ? new Promise(r=>setTimeout(async()=>{
+          if(ejecutoAlgo||yaRespondido) return r(null)
+          const salvado=await redDeSeguridad().catch(()=>null)
+          if(salvado&&!ejecutoAlgo&&!yaRespondido){ yaRespondido=true; log('[pc] la IA tardaba; lo resuelve el CLI'); return r(salvado) }
+          r(null)
+        },40000))
+      : new Promise(()=>{})
+    const promesaIA=runHiddenPromptWithRotation(previo?(previo+String.fromCharCode(10,10)+'Con esos datos responde: '+userText):userText,progress)
+    // Carrera de verdad: gana el primero que tenga algo util.
+    const ganador=await Promise.race([
+      promesaIA.then(r=>({quien:'ia',r})),
+      carrera.then(r=>r?{quien:'cli',r}:new Promise(()=>{})),
+    ])
+    if(ganador.quien==='ia'){ yaRespondido=false }
+    let respuesta=ganador.quien==='ia'?ganador.r:null
+    const rescate=ganador.quien==='cli'?ganador.r:null
+    if(rescate){
+      progress('complete','Hecho',{tool:'Terminal',action:'Completado'})
+      const limpio=String(rescate).replace(/^HECHO por el CLI:\s*/,'').replace(/^NO se pudo/,'No se pudo').trim()
+      appendTranscript('IA [cli]',limpio)
+      return limpio
+    }
     // Bucle de herramientas: como mucho 5 pasos, para que un malentendido no
     // encadene ordenes sin fin.
     for(let paso=1;paso<=5;paso++){
+      if(yaRespondido) break          // el CLI ya resolvio: no duplicar la accion
       const orden=pidePc(userText)?extraerOrden(respuesta):null
       if(!orden&&/EJECUTAR/i.test(String(respuesta||''))&&!pidePc(userText)){
         log('[puente] la petición no pedía nada del PC; ignoro la orden que arrastra el hilo')
@@ -3069,6 +3090,7 @@ async function processPrompt(userText, progress=()=>{}) {
         if(!orden) break
         progress('working','Ejecutando '+orden.tool+' en tu PC',{tool:'Terminal',action:orden.tool,detail:JSON.stringify(orden.args).slice(0,100)})
         log('[puente] '+orden.tool+' '+JSON.stringify(orden.args).slice(0,120))
+        ejecutoAlgo=true
         const limpios={}
         for(const [k,v] of Object.entries(orden.args||{})) limpios[k]=typeof v==='string'?v.normalize('NFKC'):v
         let salida
@@ -3084,6 +3106,23 @@ async function processPrompt(userText, progress=()=>{}) {
         }catch{}
         ultimoResultado=recorte
         respuesta=await runHiddenPromptWithRotation('RESULTADO de '+orden.tool+':'+String.fromCharCode(10)+recorte+String.fromCharCode(10,10)+'Responde ya al usuario. Peticion: '+userText,progress)
+      }
+    }
+    // RED DE SEGURIDAD: la IA tuvo su oportunidad. Si pediste algo del PC y no
+    // llego a ejecutar nada (se nego, dio instrucciones o no acerto con la
+    // orden), lo resuelve el CLI y se responde con eso.
+    if(pidePc(userText)&&!ejecutoAlgo){
+      const seNiega=/no (tengo|puedo)|no dispongo|sin acceso|pega (aqui|el)|no es posible/i.test(String(respuesta||''))
+      const sinAccion=!/HECHO|abierto|cerrado|listo|hecho/i.test(String(respuesta||''))
+      if(seNiega||sinAccion){
+        const salvado=await redDeSeguridad()
+        if(salvado){
+          log('[pc] la IA no ejecutó nada; lo resuelve el CLI')
+          progress('complete','Hecho',{tool:'Terminal',action:'Completado'})
+          const limpio=String(salvado).replace(/^HECHO por el CLI:\s*/,'').replace(/^NO se pudo/,'No se pudo').trim()
+          appendTranscript('IA [cli]',limpio)
+          return limpio
+        }
       }
     }
     // Si agoto los pasos y sigue pidiendo herramientas, se le exige la respuesta
