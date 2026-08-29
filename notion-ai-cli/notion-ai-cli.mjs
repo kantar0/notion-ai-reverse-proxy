@@ -1811,6 +1811,14 @@ async function getCdpForHidden() {
           try{client.close()}catch{}
           throw new Error('SESION CAIDA en '+formatAccountLabel(synchronizedAccount)+': hay que restaurar las cookies')
         }
+        if(estado.plan==='onboarding'){
+          // La pantalla esta secuestrada por el asistente de alta, pero el
+          // workspace puede tener cupo de sobra: se rota SIN tacharlo, o el pool
+          // se iria vaciando por un problema que no es de cupo.
+          log('[medida] '+formatAccountLabel(synchronizedAccount)+' atrapado en el asistente de alta; roto sin tacharlo')
+          try{client.close()}catch{}
+          throw new Error('Notion AI se quedó sin avanzar: asistente de alta en '+formatAccountLabel(synchronizedAccount))
+        }
         marcarAgotado(makeAccountKey(synchronizedAccount),estado.plan)
         log('[medida] '+formatAccountLabel(synchronizedAccount)+' descartado al instante ('+estado.plan+')')
         try{client.close()}catch{}
@@ -1982,7 +1990,12 @@ async function chatSnapshot(cdp,reqId){
     const corte=body.lastIndexOf(marca);
     const tieneMarca=corte>=0;
     let answer=corte>=0?body.slice(corte+marca.length):'';
-    answer=answer.replace(/^\]?\s*=== FIN DE CONTEXTO[^=]*===/i,'');
+    // Cortar por la MARCA de cierre, no por su forma exacta: Notion cuela
+    // caracteres sueltos ("]= ==") y el patron fijo no limpiaba nada, asi que la
+    // respuesta se leia como si fuera el contexto y se esperaba para siempre.
+    const cierre=answer.toUpperCase().lastIndexOf('SOLICITUD ANTERIOR');
+    if(cierre>=0) answer=answer.slice(cierre+'SOLICITUD ANTERIOR'.length);
+    answer=answer.replace(/^[\s=\]]+/,'');
     // Mejor fuente: el contenedor de la ÚLTIMA respuesta (la que lleva su botón
     // "Copy response"). Se sube por el DOM hasta justo antes de englobar el
     // prompt; asi no se cuela ni el turno del usuario ni el pie de la pagina
@@ -3217,9 +3230,20 @@ async function processPrompt(userText, progress=()=>{}) {
         }
       }catch{}
       ultimoResultado=recorte
-      respuesta=await runHiddenPromptWithRotation(
+      try{
+        respuesta=await runHiddenPromptWithRotation(
         'RESULTADO de '+orden.tool+' ('+(salida.ok?'ok':'error')+'):\n'+recorte+
         '\n\nResponde ya al usuario con esto. Su peticion era: '+userText,progress)
+      }catch(e){
+        // La orden YA se ejecuto: si al ir a redactar se acaba el cupo, vale
+        // mucho mas entregar el dato en crudo que un error, que deja al usuario
+        // sin nada habiendo hecho ya el trabajo.
+        log('[puente] sin poder redactar ('+String(e&&e.message||e).slice(0,80)+'); entrego el resultado tal cual')
+        progress('complete','Hecho',{tool:'Terminal',action:'Completado'})
+        const crudo=String(recorte||'').trim()
+        appendTranscript('IA [cli]',crudo)
+        return crudo||'La orden se ejecutó, pero no devolvió salida.'
+      }
     }
     // Si se niega ("no tengo acceso a tu PC"), casi siempre es que el hilo
     // arrastra una negativa suya anterior: se estrena chat y se repite una vez.
@@ -3773,12 +3797,16 @@ function spaceChatUrl(spaceId,ruta){
  *  de cupo agotado ni IA apagada. Sale en cuanto lo sabe. */
 async function medirEspacioAbierto(client,intentos=16){
   for(let i=0;i<intentos;i++){
-    const raw=await client.evaluate(`JSON.stringify((()=>{const t=(document.body&&document.body.innerText)||'';return {composer:!!document.querySelector('[contenteditable=\"true\"][role=\"textbox\"], [contenteditable=\"true\"]'),start:!!document.querySelector('[aria-label=\"Start new chat\"],[aria-label=\"New chat\"]'),login:/\/login/.test(location.href)||/Log in to your Notion account|Inicia sesi[oó]n en tu cuenta/i.test(t),off:/AI is disabled for this workspace|IA (esta|está) deshabilitada/i.test(t),trial:/trial.?s? monthly AI allowance/i.test(t),seco:new RegExp(${JSON.stringify(QUOTA_TEXT_PATTERN)},'i').test(t)}})())`,8000).catch(()=>null)
+    const raw=await client.evaluate(`JSON.stringify((()=>{const t=(document.body&&document.body.innerText)||'';return {alta:/Who else is on your team|could not create your workspace|Invite your team/i.test(t),composer:!!document.querySelector('[contenteditable=\"true\"][role=\"textbox\"], [contenteditable=\"true\"]'),start:!!document.querySelector('[aria-label=\"Start new chat\"],[aria-label=\"New chat\"]'),login:/\/login/.test(location.href)||/Log in to your Notion account|Inicia sesi[oó]n en tu cuenta/i.test(t),off:/AI is disabled for this workspace|IA (esta|está) deshabilitada/i.test(t),trial:/trial.?s? monthly AI allowance/i.test(t),seco:new RegExp(${JSON.stringify(QUOTA_TEXT_PATTERN)},'i').test(t)}})())`,8000).catch(()=>null)
     let e=null; try{ e=JSON.parse(String(raw||'')) }catch{}
     if(e){
       // Sin sesion la pantalla es el login: eso NO es falta de cupo. Marcarlo
       // como seco iba tachando workspaces buenos uno tras otro.
       if(e.login) return {usable:false,plan:'sesion-caida'}
+      // Notion puede secuestrar la pantalla con su asistente de alta ("Who else
+      // is on your team?", "We could not create your workspace"): hay composer o
+      // no, pero el chat no esta, y la peticion se quedaba esperando en vano.
+      if(e.alta) return {usable:false,plan:'onboarding'}
       if(e.off) return {usable:false,plan:'ai-desactivada'}
       if(e.seco&&!e.composer) return {usable:false,plan:e.trial?'business-trial':'free'}
       if(e.composer||e.start) return {usable:true,plan:'free'}
