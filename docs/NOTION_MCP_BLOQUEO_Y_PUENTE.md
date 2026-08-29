@@ -81,6 +81,20 @@ Notion:  "Archivo creado en ~/Desktop/x.txt"
 Funciona, pero el modelo es **irregular**: a veces ejecuta y a veces responde "no tengo
 acceso a tu PC" a la misma petición, con el mismo prompt. De ahí que exista el camino A.
 
+### Dos cosas que ensucian la respuesta y no son errores tuyos
+
+**PowerShell devuelve su barra de progreso como XML.** Al capturar stderr te llega
+`#< CLIXML` seguido de `<Objs Version="1.1.0.1">…Preparando módulos para el primer uso…`, y eso
+acaba entregado al usuario como si fuera la contestación. Se corta por lo sano: `$ProgressPreference
+= 'SilentlyContinue'` dentro del script, y además se recortan los bloques `<Objs>…</Objs>` de
+cualquier salida antes de mostrarla.
+
+**El panel anuncia como "en curso" lo que solo está escrito en el hilo.** Si lees el turno visible
+para mostrar actividad, aparecen las órdenes de peticiones anteriores e incluso los trozos del
+propio prompt (`EL_COMANDO_QUE_TOCA`, "PowerShell puede consultar…"), y da la impresión de que el
+CLI está ejecutando media docena de cosas cuando solo ejecutó una. Filtra esas líneas: lo que de
+verdad se ejecuta ya queda en el log.
+
 ### Detalles que costaron encontrar
 
 - El modelo escribe con **caracteres matemáticos unicode** (`𝑝 = 𝐽 𝑜 𝑖 𝑛 − 𝑃 𝑎 𝑡 ℎ`)

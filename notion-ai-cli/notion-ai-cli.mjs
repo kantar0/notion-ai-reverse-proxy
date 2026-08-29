@@ -1416,6 +1416,10 @@ async function scanVisibleActivity(cdp){
   })()`).catch(()=> '[]')
   let lines=[];try{lines=JSON.parse(raw||'[]')}catch{}
   const out=[]
+  // Lo que viene del prompt o de ordenes viejas NO se anuncia: el panel llego a
+  // mostrar "Write-Output uno" y hasta el hueco del formato como si fueran
+  // acciones en curso, cuando lo unico que se ejecuto fue otra cosa.
+  const esRuido=t=>/EL_COMANDO_QUE_TOCA|COMANDO_QUE|PowerShell puede consultar|escribe la consulta|Herramientas:|list_files\{path\}|Rutas relativas/i.test(String(t||''))
   const specs=[
     // Formato real del MCP en la interfaz de Notion:
     //   "PC1-cc4d / run_command Input cwd C:\… command powershell -NoProfile …"
@@ -1437,6 +1441,7 @@ async function scanVisibleActivity(cdp){
   ]
   for(const line of lines){
     if(line.length>500)continue
+    if(esRuido(line))continue
     let matched=false
     for(const [tool,re] of specs){
       const hit=line.match(re)
@@ -2852,6 +2857,22 @@ function abrirLocal(objetivo,cwd,argumentos,reintentado){
 }
 // PowerShell directo, sin cmd por medio: evita el infierno de comillas anidadas
 // al pasar guiones que ya llevan las suyas.
+// PowerShell serializa por stderr sus avisos de progreso en CLIXML
+// (<Objs Version="1.1.0.1">...). Eso no es la respuesta a nada: se quita antes
+// de que llegue al usuario.
+function limpiarClixml(texto){
+  // Sin regex: los bloques CLIXML se localizan por sus marcas y se recortan.
+  let t=String(texto||'')
+  if(t.indexOf('<Objs')<0&&t.indexOf('CLIXML')<0) return t
+  t=t.split('#< CLIXML').join('').split('#<CLIXML').join('')
+  for(let guarda=0;guarda<20;guarda++){
+    const ini=t.indexOf('<Objs')
+    if(ini<0) break
+    const cierre=t.indexOf('</Objs>',ini)
+    t=cierre>=0 ? t.slice(0,ini)+t.slice(cierre+'</Objs>'.length) : t.slice(0,ini)
+  }
+  return t.trim()
+}
 function psEval(guion,topeMs=45000){
   return new Promise(resolve=>{
     // Tope duro: sin esto un PowerShell colgado dejaba la peticion esperando
@@ -2864,7 +2885,11 @@ function psEval(guion,topeMs=45000){
     // que guiones que funcionaban a mano devolvian vacio.
     // Salida en UTF-8: sin esto los acentos volvian rotos ("pï¿½ginas") porque
     // PowerShell escribe en la pagina de codigos de la consola.
-    const conUtf8='[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;'+String.fromCharCode(10)+String(guion)
+    // Sin silenciar el progreso, PowerShell escribe por stderr su barra
+    // ("Preparando módulos para el primer uso") como CLIXML y ese XML acababa
+    // entregado al usuario como si fuera la respuesta.
+    const conUtf8='[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;'+
+      String.fromCharCode(36)+"ProgressPreference=" + String.fromCharCode(39) + "SilentlyContinue" + String.fromCharCode(39) + ";" + String.fromCharCode(10)+String(guion)
     const b64=Buffer.from(conUtf8,'utf16le').toString('base64')
     const ps=spawn('powershell',['-NoProfile','-EncodedCommand',b64],{windowsHide:true,stdio:['ignore','pipe','pipe']})
     let out='',err=''
@@ -2900,7 +2925,7 @@ function ejecutarLocal(comando,cwd){
     hijo.stderr.on('data',d=>{err+=String(d)})
     const tope=setTimeout(()=>{try{hijo.kill()}catch{}; resolve({ok:true,texto:(out||'(lanzado en segundo plano)').slice(0,4000)})},20000)
     hijo.on('close',code=>{clearTimeout(tope)
-      resolve({ok:code===0,texto:((out+(err?String.fromCharCode(10)+err:''))||'(sin salida, codigo '+code+')').slice(0,4000)})})
+      resolve({ok:code===0,texto:(limpiarClixml(out+(err?String.fromCharCode(10)+err:''))||'(sin salida, codigo '+code+')').slice(0,4000)})})
     hijo.on('error',e=>{clearTimeout(tope); resolve({ok:false,texto:'no pude ejecutar: '+e.message})})
   })
 }
@@ -3347,7 +3372,7 @@ async function processPrompt(userText, progress=()=>{}) {
       let salida
       try{ salida=await ejecutarOrden(orden.tool,orden.args) }
       catch(error){ salida={ok:false,texto:'fallo al ejecutar: '+error.message} }
-      let recorte=String(salida.texto||'').slice(0,6000)
+      let recorte=limpiarClixml(String(salida.texto||'')).slice(0,6000)
       // Contar lo hace el CLI: el modelo se equivocaba al contar sobre el
       // listado (dijo 48 carpetas donde habia 75).
       try{
@@ -3418,7 +3443,7 @@ async function processPrompt(userText, progress=()=>{}) {
         let salida
         try{ salida=await ejecutarOrden(orden.tool,limpios) }
         catch(error){ salida={ok:false,texto:'fallo al ejecutar: '+error.message} }
-        let recorte=String(salida.texto||'').slice(0,6000)
+        let recorte=limpiarClixml(String(salida.texto||'')).slice(0,6000)
         try{
           const filas=JSON.parse(salida.texto)
           if(Array.isArray(filas)&&filas.length&&filas[0]&&filas[0].type){
