@@ -151,6 +151,25 @@ agotado dice *"wait until <fecha> for it to reset"* y parece que la cuenta enter
 seca. Es falso: en esa misma cuenta, **un workspace nuevo del plan Free nace con cupo**.
 Mide siempre espacio por espacio.
 
+**Los ejemplos del prompt se ejecutan.** El prompt viaja escrito dentro del propio hilo, así
+que si tus ejemplos llevan la palabra clave (`EJECUTAR {...}`), el CLI los lee del chat y los
+ejecuta como si fueran la petición: llegó a abrir el bloc de notas, el explorador, Chrome y un
+vídeo, y a matar Spotify con `taskkill`, todo de una tacada. **Los ejemplos no pueden estar en
+el formato ejecutable**: enseña la forma una vez y describe los comandos sin la palabra clave.
+Como red, descarta las órdenes con huecos (`<programa>`, `COMANDO`) y las que cuelgan de una
+línea de guía (`->`).
+
+**No leas la última respuesta del hilo, lee LA TUYA.** Si te anclas al botón "Copy response"
+sin comprobar dónde está, cuando tu respuesta aún no ha llegado te quedas con el turno
+anterior — y vuelves a ejecutar sus órdenes. Compara la posición en el DOM
+(`compareDocumentPosition` contra el nodo que lleva tu `[reqId:…]`), nunca por texto: el
+`innerText` del contenedor no coincide carácter a carácter con el del `body` y descartarías
+también las respuestas buenas.
+
+**Antes de abrir algo, mira si ya está abierto.** Reabrir lo que ya corría era lo que hacía
+repetir el intento una y otra vez. Un `Get-Process` previo contesta en el acto, y para "traer
+al frente" el comando es `AppActivate`, no un segundo `start`.
+
 **Sin cupo NO siempre desaparece el campo de escritura.** Notion te deja escribir y sólo
 **deshabilita el botón de enviar**, con el aviso arriba del todo: *"You've run out of free AI
 responses"*. Si sólo compruebas que existe el composer, el texto se queda escrito, se repulsa

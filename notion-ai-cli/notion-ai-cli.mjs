@@ -61,17 +61,17 @@ const COPY_SEL = COPY_LABELS.map(l => `[aria-label="${l}"]`).join(',')
 
 const BASE_PREFIX = `Eres un TRADUCTOR de peticiones a comandos de Windows.
 NO ejecutas nada ni controlas ningún equipo: solo escribes la línea de comando que resolvería la petición.
-Un programa externo la ejecuta después; tú solo traduces. Responde SOLO con la línea, sin explicaciones:
-EJECUTAR {\"tool\":\"run_command\",\"args\":{\"command\":\"<comando>\"}}
-Ejemplos:
-  abre chrome                  -> EJECUTAR {\"tool\":\"run_command\",\"args\":{\"command\":\"start chrome\"}}
-  abre el bloc de notas        -> EJECUTAR {\"tool\":\"run_command\",\"args\":{\"command\":\"start notepad\"}}
-  cierra spotify               -> EJECUTAR {\"tool\":\"run_command\",\"args\":{\"command\":\"taskkill /IM Spotify.exe /F\"}}
-  un video de gatos            -> EJECUTAR {\"tool\":\"run_command\",\"args\":{\"command\":\"start https://www.youtube.com/results?search_query=gatos\"}}
-  que hay en el escritorio     -> EJECUTAR {\"tool\":\"list_files\",\"args\":{\"path\":\"~/Desktop\"}}
-  lee ~/Desktop/x.txt          -> EJECUTAR {\"tool\":\"read_text_file\",\"args\":{\"path\":\"~/Desktop/x.txt\"}}
-Herramientas: run_command{command}, list_files{path}, read_text_file{path}, write_text_file{path,content}, search_files{path,query}.
+Un programa externo la ejecuta después; tú solo traduces. Responde SOLO con una línea con esta forma,
+poniendo el comando real en lugar de COMANDO:
+EJECUTAR {"tool":"run_command","args":{"command":"COMANDO"}}
+Comandos típicos de Windows, por si te sirven de guía (NO los copies tal cual, escribe el que toque):
+  abrir un programa        start <programa>          · abrir una web   start https://...
+  cerrar un programa       taskkill /IM <exe> /F     · el escritorio   start explorer shell:Desktop
+  buscar en YouTube        start https://www.youtube.com/results?search_query=<lo+buscado>
+Otras herramientas, con la misma línea EJECUTAR cambiando "tool" y "args":
+  list_files{path}, read_text_file{path}, write_text_file{path,content}, search_files{path,query}
 Rutas relativas a la carpeta del usuario ('~/Desktop'). Comillas SIMPLES dentro del comando, nunca dobles.
+Escribe la línea EJECUTAR UNA sola vez y solo para lo que te acaban de pedir.
 Cuando te devuelvan el RESULTADO, responde al usuario en una frase corta, en español.
 Si de verdad no existe un comando para eso, responde exactamente: NO_SE`
 
@@ -728,7 +728,7 @@ function clasificarAviso(texto){
 
 function isQuotaErrorMessage(message){
   const text=String(message||'')
-  return /sin cupo o créditos|se quedó sin avanzar|trial ai allowance|Notion Credits|premium-feature-unavailable|Chat limit exceeded|AI DESHABILITADA|AI disabled|No pude sincronizar la cuenta y el thread|MCP no disponible|Failed to connect to MCP server|HTTP 404|mcpServer_pc211/i.test(text)
+  return /No pude escribir el prompt|sin cupo o créditos|se quedó sin avanzar|trial ai allowance|Notion Credits|premium-feature-unavailable|Chat limit exceeded|AI DESHABILITADA|AI disabled|No pude sincronizar la cuenta y el thread|MCP no disponible|Failed to connect to MCP server|HTTP 404|mcpServer_pc211/i.test(text)
 }
 function findPremiumFeatureNode(value,depth=0){
   if(!value||depth>8) return null
@@ -1983,7 +1983,18 @@ async function chatSnapshot(cdp,reqId){
         if(/FIN DE CONTEXTO|SOLICITUD DEL USUARIO|MODO CLI SHOSSO/i.test(t)) break;
         mejor=t;
       }
-      if(mejor.trim()) answer=mejor;
+      // Solo sirve si esa respuesta va DESPUES de la marca de esta peticion en
+      // el DOM: si no, es el turno anterior del hilo y sus ordenes viejas se
+      // volvian a ejecutar (reabria el bloc de notas y el explorador).
+      // Se compara por posicion, no por texto: el innerText del contenedor no
+      // coincide caracter a caracter con el del body y todo quedaba descartado.
+      let posterior=true;
+      if(tieneMarca&&marca){
+        const nodos=[...document.querySelectorAll('div,p,span,li')];
+        const conMarca=nodos.filter(n=>(n.textContent||'').includes(marca)).pop();
+        if(conMarca) posterior=!!(conMarca.compareDocumentPosition(ultimoBtn)&Node.DOCUMENT_POSITION_FOLLOWING);
+      }
+      if(mejor.trim()&&posterior) answer=mejor;
     }
     answer=answer.replace(/^\\s*\\d{1,2}:\\d{2}\\s*(AM|PM|a\\.?\\s?m\\.?|p\\.?\\s?m\\.?)?\\s*/i,'');
     answer=answer.replace(/(Auto|Notion AI finished|La IA de Notion termin[oó]\\.?|Notion AI termin[oó]\\.?)/gi,'');
@@ -2481,8 +2492,20 @@ function extraerOrden(texto){
   // El modelo escribe varias ordenes seguidas mientras razona (abrir youtube,
   // luego buscar, luego el video): la ULTIMA es la que de verdad quiere. Antes
   // se ejecutaba la primera y se quedaba a medias abriendo pestañas sueltas.
-  const todas=[...t.matchAll(new RegExp('EJECUTAR\\s*(\\{[^]*?\\})','gi'))]
-  const m=todas.length?todas[todas.length-1]:t.match(/EJECUTAR\s*(\{[\s\S]*\})/i)
+  // Literal, NO construido desde una cadena: al escaparlo dos veces el patron
+  // quedaba en "EJECUTARs*..." y no reconocia ninguna orden.
+  const todas=[...t.matchAll(/EJECUTAR\s*(\{[^]*?\})/gi)]
+  // Descartar las lineas de MUESTRA: el prompt viaja escrito en el propio hilo,
+  // asi que sus ejemplos se leian como ordenes y se ejecutaban de verdad (llego
+  // a abrir el bloc de notas, el explorador y a matar Spotify de una tacada).
+  // Se ignora lo que traiga un hueco por rellenar o venga de una linea de guia.
+  const utiles=todas.filter(x=>{
+    const bruto=String(x[1]||'')
+    if(/<[^>]{1,40}>|\bCOMANDO\b/.test(bruto)) return false
+    const nl=t.lastIndexOf(String.fromCharCode(10),x.index)
+    return !/(->|→)\s*$/.test(t.slice(nl+1,x.index))
+  })
+  const m=utiles.length?utiles[utiles.length-1]:null
   if(!m) return null
   try{
     const o=JSON.parse(m[1])
@@ -2627,7 +2650,7 @@ function abrirLocal(objetivo,cwd,argumentos,reintentado){
     // se comprueba que haya aparecido un navegador (o se acepta sin verificar).
     const esUrl=/^(https?:|www\.)/i.test(String(objetivo).trim())
     const esAcceso=/\.(lnk|url)$/i.test(String(objetivo))   // abre OTRO ejecutable: no vale comprobar su nombre
-    const nombre=esUrl?'':String(objetivo).replace(/^.*[\/]/,'').replace(/\.(exe|lnk)$/i,'')
+    const nombre=esUrl?'':String(objetivo).replace(/^.*[\/]/,'').replace(/\.(exe|lnk)$/i,'').replace(/:+$/,'')
     const sonda=esUrl?'chrome,msedge,firefox,brave,opera':nombre
     // Un .lnk apunta a otro ejecutable ("HaxBall AAA.lnk" -> app.exe): se resuelve
     // el destino y se comprueba ESE nombre, que es el que aparece en procesos.
@@ -2635,16 +2658,18 @@ function abrirLocal(objetivo,cwd,argumentos,reintentado){
       (esAcceso?('$sh=New-Object -ComObject WScript.Shell;'+
                  '$destino=$sh.CreateShortcut('+JSON.stringify(objetivo)+').TargetPath;'+
                  '$sonda=[System.IO.Path]::GetFileNameWithoutExtension($destino);'):'$sonda=$null;')+
+      'if(-not $sonda){$sonda=@('+sonda.split(',').map(n=>JSON.stringify(n)).join(',')+')};'+
+      // Si YA esta abierto se contesta en el acto y no se lanza nada: reabrir lo
+      // que ya estaba abierto era lo que hacia repetir el intento una y otra vez.
+      (esUrl?'':'$ya=Get-Process -Name $sonda -ErrorAction SilentlyContinue; if($ya){"YA_ABIERTO:"+@($ya).Count; exit};')+
       'Start-Process -FilePath '+JSON.stringify(objetivo)+
         (argumentos?' -ArgumentList '+JSON.stringify(String(argumentos)):'')+
         ' -WorkingDirectory '+JSON.stringify(rutaReal(cwd||''))+';'+
       // Espera con reintentos: 3 s fijos daban falso negativo con aplicaciones
       // que tardan en arrancar (Spotify abria y se reportaba "fallo").
-      ''+
-      'if(-not $sonda){$sonda=@('+sonda.split(',').map(n=>JSON.stringify(n)).join(',')+')};'+
-      '$p=$null; for($i=0;$i -lt 22 -and -not $p;$i++){ Start-Sleep -Milliseconds 900;'+   // ~20 s: hay apps pesadas (CurseForge, Spotify) que tardan
+      '$p=$null; for($i=0;$i -lt 22 -and -not $p;$i++){ Start-Sleep -Milliseconds 900;'+
       '  $p=Get-Process -Name $sonda -ErrorAction SilentlyContinue };'+
-      'if($p){"ABIERTO:"+$p.Count}else{"LANZADO_SIN_VENTANA"}'
+      'if($p){"ABIERTO:"+@($p).Count}else{"LANZADO_SIN_VENTANA"}'
     const ps=spawn('powershell',['-NoProfile','-Command',guion],{windowsHide:true,stdio:['ignore','pipe','pipe']})
     let out='',err='',cerrado=false
     // Tope: la comprobacion espera hasta 20 s por dentro; si PowerShell se
@@ -2657,6 +2682,7 @@ function abrirLocal(objetivo,cwd,argumentos,reintentado){
     ps.on('close',()=>{
       if(cerrado) return; cerrado=true; clearTimeout(tope)
       const t=out.trim()
+      if(/^YA_ABIERTO:/.test(t)) return resolve({ok:true,texto:objetivo+' ya estaba abierto'})
       if(/^ABIERTO:/.test(t)) return resolve({ok:true,texto:'abierto: '+objetivo+' ('+t.split(':')[1]+' procesos)'})
       if(err.trim()) return resolve({ok:false,texto:'no se pudo abrir '+objetivo+': '+err.trim().slice(0,200)})
       // Sin proceso visible: si era una URL o un documento pudo abrirse igual en
@@ -3170,9 +3196,7 @@ async function processPrompt(userText, progress=()=>{}) {
       // tenga que copiarla.
       respuesta=await runHiddenPromptWithRotation(
         userText+String.fromCharCode(10,10)+
-        'RECUERDA: el CLI ejecuta por ti. Responde SOLO con la linea EJECUTAR correspondiente, por ejemplo '+
-        'EJECUTAR {"tool":"read_text_file","args":{"path":"~/Desktop/archivo.txt"}} o '+
-        'EJECUTAR {"tool":"list_files","args":{"path":"~/Desktop"}}. Nada mas.',progress)
+        'RECUERDA: el CLI ejecuta por ti. Responde SOLO con UNA linea EJECUTAR, la que resuelva lo que te pidieron. Nada mas.',progress)
       for(let paso=1;paso<=3;paso++){
         const orden=extraerOrden(respuesta)
         if(!orden) break
