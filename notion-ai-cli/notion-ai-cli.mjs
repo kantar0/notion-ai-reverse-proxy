@@ -61,7 +61,7 @@ const COPY_SEL = COPY_LABELS.map(l => `[aria-label="${l}"]`).join(',')
 
 const BASE_PREFIX = `MODO CLI SHOSSO. Responde únicamente en la terminal, en español, texto plano, breve y directo. Tienes control del PC del usuario, pero NO por herramientas MCP: Notion las tiene bloqueadas. Las ejecuta el CLI por ti. Cuando necesites algo del PC, responde SOLO con esta línea y nada más:
 EJECUTAR {"tool":"<herramienta>","args":{...}}
-El CLI la ejecuta y te devuelve el resultado; entonces responde al usuario. Puedes encadenar varias, una por turno. Herramientas: list_files{path}, read_text_file{path}, write_text_file{path,content}, search_files{path,query}, make_directory{path}, move_path{from,to}, delete_path{path}, run_command{command,cwd}, start_background_command{command}, check_health{}, get_workspace_info{}. RUTAS relativas a la carpeta del usuario: usa '~/Desktop' o 'Desktop', nunca rutas absolutas. El JSON debe ser valido: dentro de los comandos usa comillas SIMPLES, nunca dobles. Usa list_files/read_text_file/search_files; run_command solo si piden ejecutar algo concreto. Cuando el CLI te de un RECUENTO EXACTO, dalo tal cual sin recalcularlo. Si ya tienes el resultado, NO vuelvas a pedir EJECUTAR: contesta. EJEMPLO exacto de como se usa:
+El CLI la ejecuta y te devuelve el resultado; entonces responde al usuario. Puedes encadenar varias, una por turno. Herramientas: list_files{path}, read_text_file{path}, write_text_file{path,content}, search_files{path,query}, make_directory{path}, move_path{from,to}, delete_path{path}, run_command{command,cwd}, start_background_command{command}, check_health{}, get_workspace_info{}. RUTAS relativas a la carpeta del usuario: usa '~/Desktop' o 'Desktop', nunca rutas absolutas. El JSON debe ser valido: dentro de los comandos usa comillas SIMPLES, nunca dobles. Usa list_files/read_text_file/search_files; run_command solo si piden ejecutar algo concreto. Para ABRIR un programa usa su nombre de ejecutable, no una URL: EJECUTAR {"tool":"run_command","args":{"command":"start chrome"}} (o notepad, explorer, code...). Para abrir un archivo, pon su ruta en start. Cuando el CLI te de un RECUENTO EXACTO, dalo tal cual sin recalcularlo. Si ya tienes el resultado, NO vuelvas a pedir EJECUTAR: contesta. EJEMPLO exacto de como se usa:
 Usuario: cuantas carpetas hay en el escritorio
 Tu: EJECUTAR {\"tool\":\"list_files\",\"args\":{\"path\":\"~/Desktop\"}}
 CLI: RESULTADO de list_files (ok): RECUENTO EXACTO: 164 entradas = 75 carpetas + 89 archivos
@@ -2149,6 +2149,12 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
     // pregunta en el mismo workspace, que es lo que lo destraba.
     else if(s.tieneMarca&&!s.sinCupo){
       const soloProgreso=esProgreso(norm(limpiar(s.answer)))||!String(s.answer||'').trim()
+      // Agotados los reenvios, el workspace no va a contestar: se descarta y se
+      // rota, en vez de reenviar en bucle para siempre.
+      if(soloProgreso&&Date.now()-ultimoCambio>90000&&reenvios>=3){
+        log('[colgado] '+reenvios+' reenvíos sin respuesta; descarto este workspace')
+        throw new Error('Notion AI se quedó sin avanzar en este workspace')
+      }
       if(soloProgreso&&Date.now()-ultimoCambio>90000&&reenvios<3){
         reenvios++
         log('[colgado] Notion lleva 90 s en su indicador de progreso; reenvío la pregunta ('+reenvios+'/3)')
@@ -2475,11 +2481,15 @@ function abrirLocal(objetivo,cwd){
     // hacia que el CLI dijera "listo, ya esta abierto" sin haber abierto nada
     // (pasa si el daemon corre sin sesion grafica: entonces no hay escritorio
     // donde dibujar la ventana).
-    const nombre=String(objetivo).replace(/^.*[\/]/,'').replace(/\.(exe|lnk)$/i,'')
+    // Si lo que se abre es una URL o un documento, no hay proceso con ese nombre:
+    // se comprueba que haya aparecido un navegador (o se acepta sin verificar).
+    const esUrl=/^(https?:|www\.)/i.test(String(objetivo).trim())
+    const nombre=esUrl?'':String(objetivo).replace(/^.*[\/]/,'').replace(/\.(exe|lnk)$/i,'')
+    const sonda=esUrl?'chrome,msedge,firefox,brave,opera':nombre
     const guion='$ErrorActionPreference="Stop";'+
       'Start-Process -FilePath '+JSON.stringify(objetivo)+' -WorkingDirectory '+JSON.stringify(rutaReal(cwd||''))+';'+
       'Start-Sleep -Seconds 3;'+
-      '$p=Get-Process '+JSON.stringify(nombre)+' -ErrorAction SilentlyContinue;'+
+      '$p=Get-Process '+sonda.split(',').map(n=>JSON.stringify(n)).join(',')+' -ErrorAction SilentlyContinue;'+
       'if($p){"ABIERTO:"+$p.Count}else{"LANZADO_SIN_VENTANA"}'
     const ps=spawn('powershell',['-NoProfile','-Command',guion],{windowsHide:true,stdio:['ignore','pipe','pipe']})
     let out='',err=''
@@ -2490,7 +2500,10 @@ function abrirLocal(objetivo,cwd){
       const t=out.trim()
       if(/^ABIERTO:/.test(t)) return resolve({ok:true,texto:'abierto: '+objetivo+' ('+t.split(':')[1]+' procesos)'})
       if(err.trim()) return resolve({ok:false,texto:'no se pudo abrir '+objetivo+': '+err.trim().slice(0,200)})
-      resolve({ok:false,texto:'lancé '+objetivo+' pero NO aparece ninguna ventana; probablemente el daemon no tiene sesión de escritorio'})
+      // Sin proceso visible: si era una URL o un documento pudo abrirse igual en
+      // una ventana ya existente, asi que no se afirma que haya fallado.
+      if(esUrl) return resolve({ok:true,texto:'abierto: '+objetivo})
+      resolve({ok:false,texto:'lancé '+objetivo+' pero no veo su ventana (¿se cerró enseguida?)'})
     })
   })
 }
