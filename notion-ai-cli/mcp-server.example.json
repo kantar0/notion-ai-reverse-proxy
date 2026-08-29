@@ -1,0 +1,6 @@
+{
+  "url": "https://TU-SERVIDOR-MCP.example.com",
+  "name": "PC1",
+  "auth": "bearer",
+  "token": "PON-AQUI-TU-TOKEN"
+}

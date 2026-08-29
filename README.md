@@ -11,6 +11,20 @@ Además incluye notas del **router local de Shosso** para operar con menor consu
 
 ## Qué contiene
 
+### 0) Notion AI CLI (terminal con control del PC) — `notion-ai-cli/`
+
+Terminal que usa Notion AI como motor y **tu PC como manos**: preguntas desde una consola,
+Notion razona y las herramientas del sistema de archivos las ejecuta el CLI. Incluye
+rotación automática entre workspaces/cuentas para no quedarse sin cupo.
+
+**Importante:** desde el 2026-08-28 Notion bloquea las herramientas de cualquier servidor
+MCP propio (`Tool 'X' has changed its operation type since the last admin approval`),
+incluso en workspaces recién creados y con herramientas que nunca había visto. El CLI lo
+esquiva ejecutando las herramientas él mismo.
+
+- Cómo se diagnosticó y cómo se resolvió: [`docs/NOTION_MCP_BLOQUEO_Y_PUENTE.md`](docs/NOTION_MCP_BLOQUEO_Y_PUENTE.md)
+- Uso e instalación: [`notion-ai-cli/README.md`](notion-ai-cli/README.md)
+
 ### 1) Reverse proxy de Notion AI
 Permite exponer Notion AI como una API estilo OpenAI (`/v1/chat/completions`) para usarlo desde scripts, terminales, herramientas locales o clientes que esperan ese formato.
 

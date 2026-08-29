@@ -1,0 +1,17 @@
+# Credenciales y estado local: NUNCA se publican
+mcp-server.json
+cli-accounts.json
+cli-state.json
+account-sessions/
+headless-browser-profile/
+popup-profiles/
+bridge-requests/
+bridge-responses/
+bridge-progress/
+mcp-workspace-registry.json
+space-recyclable.json
+cli-memory.md
+cli-transcript.md
+*.log
+*.bak
+*.backup-*
