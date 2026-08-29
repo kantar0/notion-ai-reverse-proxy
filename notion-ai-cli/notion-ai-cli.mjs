@@ -2724,7 +2724,7 @@ async function aperturaEnPc(texto){
     if(i<0) continue
     const sig=bajo[i+v.length]
     if(sig!==undefined&&sig!==' '&&sig!=='.'&&sig!==',') continue
-    if(corte<0||i<corte){ corte=i; largo=v.length; conPronombre=/lo$|la$|me$/.test(v) }
+    if(corte<0||i<corte){ corte=i; largo=v.length; conPronombre=/(lo|la|los|las)$/.test(v) }
   }
   if(corte<0) return null
   let objetivo=bruto.slice(corte+largo).trim()
@@ -2841,7 +2841,7 @@ async function cierreEnPc(texto){
     if(i<0) continue
     const sig=bajo[i+v.length]
     if(sig!==undefined&&sig!==' '&&sig!=='.'&&sig!==',') continue   // evitar cazar dentro de otra palabra
-    if(corte<0||i<corte){ corte=i; largo=v.length; conPronombre=/lo$|la$|los$|me$/.test(v) }
+    if(corte<0||i<corte){ corte=i; largo=v.length; conPronombre=/(lo|la|los|las)$/.test(v) }
   }
   if(corte<0) return null
   let objetivo=bruto.slice(corte+largo).trim()
@@ -2896,11 +2896,16 @@ async function processPrompt(userText, progress=()=>{}) {
     let ultimoResultado=null
     const ordenesVistas=new Set()
     // Si la peticion nombra una ruta, se resuelve YA y se le da hecha.
-    const web=await webEnPc(userText).catch(e=>{log('[pc] web falló: '+String(e&&e.message||e).slice(0,120));return null})
-    const ventana=web||await ventanaEnPc(userText).catch(e=>{log('[pc] ventana falló: '+String(e&&e.message||e).slice(0,120));return null})
-    const cerrado=ventana||await cierreEnPc(userText).catch(e=>{log('[pc] cierre falló: '+String(e&&e.message||e).slice(0,120));return null})
-    const abierto=cerrado||await aperturaEnPc(userText).catch(e=>{log('[pc] apertura falló: '+String(e&&e.message||e).slice(0,120));return null})
-    const escrito=abierto||await escrituraEnPc(userText).catch(e=>{log('[pc] escritura falló: '+String(e&&e.message||e).slice(0,120));return null})
+    // ATAJOS DESACTIVADOS (decisión del usuario, 2026-08-29): la IA se encarga de
+    // todo por el camino general (ordenes EJECUTAR que ejecuta el CLI). Los
+    // atajos deterministas quedan disponibles con "atajosPc": true en
+    // cli-state.json por si hiciera falta volver a ellos.
+    const atajos=loadState().atajosPc===true
+    const web=atajos?await webEnPc(userText).catch(e=>{log('[pc] web falló: '+String(e&&e.message||e).slice(0,120));return null}):null
+    const ventana=web||(atajos?await ventanaEnPc(userText).catch(e=>{log('[pc] ventana falló: '+String(e&&e.message||e).slice(0,120));return null}):null)
+    const cerrado=ventana||(atajos?await cierreEnPc(userText).catch(e=>{log('[pc] cierre falló: '+String(e&&e.message||e).slice(0,120));return null}):null)
+    const abierto=cerrado||(atajos?await aperturaEnPc(userText).catch(e=>{log('[pc] apertura falló: '+String(e&&e.message||e).slice(0,120));return null}):null)
+    const escrito=abierto||(atajos?await escrituraEnPc(userText).catch(e=>{log('[pc] escritura falló: '+String(e&&e.message||e).slice(0,120));return null}):null)
     // Una accion ya ejecutada (abrir, escribir) NO necesita que Notion redacte la
     // confirmacion: el trabajo esta hecho y esperar a que conteste solo suma
     // 30-60 s y el riesgo de que se cuelgue en su indicador de progreso.
@@ -2932,11 +2937,10 @@ async function processPrompt(userText, progress=()=>{}) {
       // el resultado (se vieron 5 vueltas con "cmd /c start chrome"). Repetirla
       // no aporta: se corta y se le exige la respuesta con lo que ya tiene.
       if(orden){
-        // Huella por ACCION, no por texto exacto: "start chrome <url1>" y
-        // "start chrome <url2>" son la misma accion repetida y llenaban la
-        // pantalla de pestañas.
-        const cmd=String(orden.args&&orden.args.command||'')
-        const huella=orden.tool+' '+(cmd?cmd.split(/\s+/).slice(0,2).join(' '):JSON.stringify(orden.args))
+        // Huella por comando COMPLETO: agrupar por accion ("start chrome") cortaba
+        // secuencias legitimas (buscar en YouTube y luego abrir el video). Solo
+        // se corta la orden identica repetida, que es el bucle de verdad.
+        const huella=orden.tool+' '+JSON.stringify(orden.args)
         if(ordenesVistas.has(huella)){
           log('[puente] orden repetida ('+orden.tool+'); cierro con lo que ya hay')
           respuesta=await runHiddenPromptWithRotation(
