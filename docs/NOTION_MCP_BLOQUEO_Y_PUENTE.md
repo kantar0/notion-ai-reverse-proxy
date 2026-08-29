@@ -129,6 +129,27 @@ redactarla. Para que una petición de varios pasos siga funcionando con un solo 
 **todas** las órdenes de esa respuesta, en el orden en que las escribió. Con `redactarConIA: true`
 en `cli-state.json` vuelve el modo de dos turnos.
 
+Cuatro cosas gastaban respuestas sin dar nada a cambio, y hay que quitarlas todas para que una
+petición cueste de verdad una sola:
+
+- **Reenviar cuando Notion ya está generando.** Si la marca del `[reqId:]` no aparece todavía, mira
+  antes si hay un *"is generating a response"* en la página: el prompt salió, y reenviar tira la
+  respuesta en curso y paga otra.
+- **Enviar el primer mensaje crea el hilo.** Notion navega a `?t=…` y durante ese parpadeo la marca
+  no está en la página: parece que el prompt se perdió. Confírmalo con calma **una sola vez**, no en
+  cada vuelta, o la petición se queda dando vueltas hasta agotar el tope.
+- **En un hilo recién creado el turno del usuario no aparece**, así que la marca nunca llega. Si el
+  envío ya se confirmó, acepta la respuesta sin ella: si no, descartas una contestación ya escrita
+  y ya pagada.
+- **Nada de sincronizar en medio de una petición.** Refrescar la sesión o cambiar de cuenta mueve el
+  hilo del chat y la respuesta se pierde con su cupo gastado ("el chat cambió de hilo").
+
+Y no aceptes cualquier hilo `?t=` guardado: comprueba que es **de la cuenta activa**. Si es de otro
+workspace, Notion recarga con un chat nuevo y la petición se pierde.
+
+**Medido:** con esto, "abre la calculadora" pasó de nueve envíos sin resultado a **un solo envío**,
+con la aplicación abierta en 42 segundos.
+
 **Comprobado el 2026-08-29:** el error de "operation type" ya no aparece, pero **el MCP no está
 disponible en los workspaces del plan Free**: darlo de alta por API lo rechaza Notion
 (`Client saveTransactions request targets tables blocked by policy`), en los espacios que ya tenían

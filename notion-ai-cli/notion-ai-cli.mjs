@@ -1890,9 +1890,17 @@ async function getCdpForHidden() {
   const candidateThread=extractThreadIdFromUrl(state.selectedChatUrl)
   if(!workspaceSwitched&&candidateThread&&synchronizedAccount?.spaceId){
     const probeExpr="(async()=>{try{const threadId="+JSON.stringify(candidateThread)+",spaceId="+JSON.stringify(synchronizedAccount.spaceId)+",userId="+JSON.stringify(synchronizedAccount.userId||synchronizedAccount.uid||null)+";const body={requests:[{pointer:{table:'thread',id:threadId,spaceId},version:-1}],spacePointer:{table:'space',id:spaceId}};const r=await fetch('/api/v3/syncRecordValuesSpaceInitial',{method:'POST',credentials:'include',headers:{'content-type':'application/json','x-notion-space-id':spaceId,'x-notion-active-user-header':userId},body:JSON.stringify(body)});const p=await r.json();return !!(p?.recordMap?.thread?.[threadId])}catch{return false}})()"
-    if(state.selectedChatUrl&&state.selectedChatUrl.includes('?t=')){
+    // El atajo solo vale si el hilo es DE ESTA cuenta: aceptar cualquier ?t=
+    // hacia navegar a un hilo de otro workspace, Notion recargaba con un chat
+    // nuevo y la peticion se perdia con su cupo ya gastado.
+    const dueno=state.selectedChatOwnerKey||''
+    const actual=makeAccountKey(synchronizedAccount)
+    if(state.selectedChatUrl&&state.selectedChatUrl.includes('?t=')&&dueno&&dueno===actual){
   selectedThreadValid=true;
-  log('[mcp-sync] Thread con ?t= aceptado directamente (bypass probe)');
+  log('[mcp-sync] Thread con ?t= de esta misma cuenta: aceptado');
+}else if(state.selectedChatUrl&&state.selectedChatUrl.includes('?t=')&&dueno&&dueno!==actual){
+  selectedThreadValid=false;
+  log('[mcp-sync] El hilo guardado es de otra cuenta; estreno chat en este workspace');
 }else{
   selectedThreadValid=await client.evaluate(probeExpr,30000).catch(()=>false);
 }
@@ -2093,6 +2101,15 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
   for(let intento=1;intento<=2&&!enviado;intento++){
     for(let i=0;i<20&&!enviado;i++){ await sleep(1500); enviado=await promptEnPantalla() }
     if(!enviado&&intento===1){
+      // Si Notion YA está generando, el prompt salió aunque no se vea todavía en
+      // el texto de la página. Reinsertar aquí gastaba OTRA respuesta del cupo y
+      // encima tiraba la que se estaba escribiendo.
+      const generando=await cdp.evaluate(`(()=>{const t=(document.body&&document.body.innerText)||'';return /is generating a response|Notion AI finished/i.test(t)?'si':'no'})()`).catch(()=>'no')
+      if(String(generando).includes('si')){
+        log('[insert] no veo el prompt, pero Notion ya está generando: doy por enviado')
+        enviado=true
+        break
+      }
       log('[insert] el prompt no aparece en el chat; reintento el envío')
       await insertPrompt(cdp,promptText).catch(e=>log('[insert] reintento falló: '+e.message))
     }
@@ -2115,6 +2132,7 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
   const limite=Date.now()+4*60_000
   let estable=0, ultimo='', vistos=new Set(), reenvios=0, atascos=0, huellaPrevia='', ultimoCambio=Date.now()
   let arranco=false, envioEn=Date.now(), lecturasMuertas=0, vueltas=0
+  let marcaConfirmada=false
   const esAccion=pidePc(String(promptText||'').replace(/^[\s\S]*SOLICITUD DEL USUARIO:/,''))
   // Cada lectura con tope propio: si el navegador deja de contestar, la petición
   // se quedaba colgada sin poder ni comprobar su propio límite de 10 minutos.
@@ -2233,7 +2251,28 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
         continue
       }
     }catch(e){ log('[reenganche] '+String(e.message||e).slice(0,90)) }
-    if(marcaEnvio&&s.tieneMarca===false){
+    if(marcaEnvio&&s.tieneMarca===false&&!marcaConfirmada){
+      // Al enviar el PRIMER mensaje, Notion crea el hilo y navega a ?t=: durante
+      // ese parpadeo la marca no está en la página y el CLI creía que el prompt
+      // se había perdido, reenviando y gastando otra respuesta del cupo. Se
+      // confirma con calma antes de decidir.
+      let confirmado=false
+      for(let i=0;i<6&&!confirmado;i++){
+        await sleep(2500)
+        const otra=await chatSnapshot(cdp,marcaEnvio).catch(()=>null)
+        if(otra&&otra.tieneMarca) confirmado=true
+        else{
+          const gen=await cdp.evaluate(`(()=>{const t=(document.body&&document.body.innerText)||'';return /is generating a response/i.test(t)?'si':'no'})()`).catch(()=>'no')
+          if(String(gen).includes('si')) confirmado=true
+        }
+      }
+      if(confirmado){
+        // Una sola vez: si se confirma en cada vuelta, la peticion se queda
+        // dando vueltas aqui hasta agotar el tope sin llegar a leer nada.
+        marcaConfirmada=true
+        log('[insert] la marca tardó en aparecer (hilo recién creado); sigo esperando la respuesta')
+        continue
+      }
       if(reenvios<3){
         reenvios++
         // Notion se recarga sola cuando despliega version nueva (la URL pasa a
@@ -2329,7 +2368,10 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
     // marque "finished" (a veces no lo hace y la peticion se quedaba dando
     // vueltas con la contestacion ya escrita en pantalla). Se exigen tres
     // lecturas identicas para no cortar a mitad de redaccion.
-    if(s.tieneMarca&&actual&&!esProgreso(actual)&&!esContexto(actual)){
+    // En un hilo recien creado el turno del usuario no aparece en la pagina, asi
+    // que la marca nunca esta: si el envio ya se confirmo, la respuesta vale
+    // igual. Sin esto se descartaba una contestacion ya escrita (y ya pagada).
+    if((s.tieneMarca||marcaConfirmada)&&actual&&!esProgreso(actual)&&!esContexto(actual)){
       if(actual===norm(ultimo)){ if(++estable>=(s.finished?1:2)) return actual }
       else { estable=0; ultimo=actual }
     }
@@ -4070,6 +4112,13 @@ async function startLiveAccountSync(){
   // Ciclo de sincronizacion
   setInterval(async()=>{
     try{
+      // NUNCA en medio de una peticion: cambiar de cuenta o refrescar la sesion
+      // mueve el hilo del chat y se pierde la respuesta que Notion ya estaba
+      // escribiendo ("el chat cambió de hilo y la solicitud se perdió"), con su
+      // cupo ya gastado. Se salta el turno y se hace en el siguiente.
+      try{
+        if(fs.readdirSync(REQ_DIR).some(n=>n.endsWith('.working.json'))) return
+      }catch{}
       // 1. Detectar cambios en cookies de Zen
       let zenChanged=false;
       if(fs.existsSync(zenBase)){
