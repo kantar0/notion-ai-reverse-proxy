@@ -2034,7 +2034,10 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
       // En una conversacion normal, las ordenes que el modelo arrastra del hilo
       // NO se ejecutan; mostrarlas como actividad hacia creer que un "Hi" estaba
       // abriendo videos. Se ocultan.
-      if(!esAccion&&/EJECUTAR|run_command|start |taskkill|powershell/i.test(String(ev.action||'')+String(ev.detail||''))) continue
+      const crudo=String(ev.action||'')+' '+String(ev.detail||'')
+      // Nunca mostrar como "actividad" trozos de nuestro propio prompt.
+      if(/FIN DE CONTEXTO|SOLICITUD DEL USUARIO|RECUERDA:|PROGRAMAS YA ABIERTOS|MODO CLI SHOSSO|\[reqId:/i.test(crudo)) continue
+      if(!esAccion&&/EJECUTAR|run_command|start |taskkill|powershell/i.test(crudo)) continue
       if(!vistos.has(k)){ vistos.add(k); progress('working',ev.action,ev) }
     }
     // Si Notion contesta con el aviso de cupo, no hay respuesta que esperar:
@@ -2739,6 +2742,10 @@ async function aperturaEnPc(texto){
   let objetivo=bruto.slice(corte+largo).trim()
   objetivo=objetivo.replace(/^(el|la|los|las|un|una)\s+/i,'')
   objetivo=objetivo.replace(/^(programa|aplicaci[oó]n|app|archivo|fichero)\s+/i,'')
+  // Coletillas que no forman parte del nombre: "abre el youtube EN MI PC" no
+  // encontraba nada porque buscaba "youtube en mi pc".
+  objetivo=objetivo.replace(/\s+(en|de|desde)\s+(mi|el|la)\s+(pc|ordenador|computadora|equipo|maquina|escritorio)[^]*$/i,'')
+  objetivo=objetivo.replace(/\s*(por favor|porfa|porfavor|ahora|ya|please)\s*$/i,'')
   objetivo=objetivo.replace(/[.?!,]+$/,'').trim()
   // "abrelo" no nombra nada: se refiere a lo ultimo de lo que hablamos (lo que
   // se abrio o se cerro). Sin esto la peticion caia en el modelo, que repetia
