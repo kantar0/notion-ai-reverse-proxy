@@ -81,6 +81,18 @@ Notion:  "Archivo creado en ~/Desktop/x.txt"
 Funciona, pero el modelo es **irregular**: a veces ejecuta y a veces responde "no tengo
 acceso a tu PC" a la misma petición, con el mismo prompt. De ahí que exista el camino A.
 
+### Hilo limpio por TERMINAL, no por petición
+
+El hilo de Notion acumula, y una terminal recién abierta heredaba lo que hubiera dentro: a un
+*"revisa qué tengo abierto en Edge"* llegó a contestar **"ok"**, que era la respuesta de la petición
+anterior. Estrenar chat en **cada** petición lo arregla pero rompe la conversación: la IA deja de
+recordar lo que acabas de decirle. El corte correcto es **por terminal**: se estrena hilo cuando
+cambia el PID del cliente, y mientras sigas escribiendo en esa misma terminal se conserva.
+
+Y si te anclas al `[reqId:]` pero además aceptas respuestas sin él (porque en un hilo recién creado
+la marca tarda), exige al menos que el texto **no sea el mismo** que ya había antes de enviar. Sin
+esa condición vuelves a servir la contestación del turno anterior.
+
 ### Un Ctrl+C en la terminal no cancela nada por sí solo
 
 La cola es serializada (un único navegador), así que si matas el cliente mientras Notion trabaja, el

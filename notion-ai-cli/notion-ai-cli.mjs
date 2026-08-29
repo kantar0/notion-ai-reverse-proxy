@@ -2096,10 +2096,40 @@ async function chatSnapshot(cdp,reqId){
     return {failed:true}
   }
 }
+// Estrena un hilo: sin esto cada petición hereda lo que hubiera en el chat.
+async function estrenarChat(cdp){
+  const pulsar=`(()=>{for(const etiqueta of ['Start new chat','New chat','Nuevo chat']){
+    const e=document.querySelector('[aria-label="'+etiqueta+'"]')
+    if(e){ e.click(); return 'si' }
+  }
+  const alt=[...document.querySelectorAll('button,[role="button"],div[tabindex]')]
+    .find(x=>/^(start new chat|new chat|nuevo chat)$/i.test((x.textContent||'').trim()))
+  if(alt){ alt.click(); return 'si' }
+  return 'no'})()`
+  const r=await cdp.evaluate(pulsar).catch(()=>'no')
+  if(!String(r).includes('si')) return false
+  await sleep(2500)
+  return true
+}
 async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real'){
   progress('waiting','Esperando que el thread quede libre',{tool:'Task',action:'Thread libre'})
   await waitUntil(async()=>{const s=await chatSnapshot(cdp);return s.busy===false},10*60_000,700,'thread libre')
   const antes=await chatSnapshot(cdp)
+  // Chat NUEVO por petición: el hilo acumula, y con él las respuestas y órdenes
+  // de lo anterior. De ahí venía que a "revisa qué tengo abierto en Edge"
+  // contestara "ok" (la respuesta de la petición de antes) y que se ejecutaran
+  // comandos viejos. Estrenar cuesta unos segundos y no gasta cupo.
+  // Hilo limpio SOLO al estrenar terminal: si sigues hablando en el mismo CLI se
+  // conserva el hilo, que es donde está el contexto de la conversación. Lo que
+  // no puede pasar es que un CLI nuevo herede la respuesta del anterior.
+  const duenoAhora=peticionEnCurso&&peticionEnCurso.clientPid
+  if(duenoAhora&&duenoAhora!==clienteDelHilo){
+    try{
+      const estrenado=await estrenarChat(cdp)
+      log(estrenado?'[chat] terminal nueva: estreno hilo limpio':'[chat] terminal nueva pero no pude estrenar')
+    }catch(e){ log('[chat] estreno falló: '+String(e&&e.message||e).slice(0,80)) }
+    clienteDelHilo=duenoAhora
+  }
   progress('sending','Escribiendo la solicitud en el worker real',{tool:'Write',action:label})
   await insertPrompt(cdp,promptText)
 
@@ -2392,7 +2422,12 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
     // En un hilo recien creado el turno del usuario no aparece en la pagina, asi
     // que la marca nunca esta: si el envio ya se confirmo, la respuesta vale
     // igual. Sin esto se descartaba una contestacion ya escrita (y ya pagada).
-    if((s.tieneMarca||marcaConfirmada)&&actual&&!esProgreso(actual)&&!esContexto(actual)){
+    // Sin la marca en pantalla solo vale una respuesta NUEVA: si no, se acepta
+    // la del turno anterior del hilo. Pasó de verdad: a "revisa qué tengo
+    // abierto en Edge" contestó "ok", que era la respuesta de la petición de
+    // antes.
+    const nuevaDeVerdad=s.tieneMarca||(marcaConfirmada&&actual!==norm(limpiar(base.answer)))
+    if(nuevaDeVerdad&&actual&&!esProgreso(actual)&&!esContexto(actual)){
       if(actual===norm(ultimo)){ if(++estable>=(s.finished?1:2)) return actual }
       else { estable=0; ultimo=actual }
     }
@@ -3702,6 +3737,8 @@ function enqueue(task){const p=serial.then(task,task);serial=p.catch(()=>{});ret
 // sirve para tener la cola ocupada: el siguiente CLI se queda en "trabajando"
 // esperando un turno que no llega.
 let peticionEnCurso=null
+// Qué terminal es dueña del hilo abierto: al cambiar, se estrena uno limpio.
+let clienteDelHilo=null
 function clienteVivo(req){
   const pid=Number(req&&req.clientPid)
   if(!pid) return true                       // peticiones sin PID: no se tocan
