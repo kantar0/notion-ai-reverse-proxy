@@ -157,6 +157,22 @@ workspace, Notion recarga con un chat nuevo y la petición se pierde.
   formado, pasos agotados) terminaban preguntando a la IA con el resultado ya en la mano. Eso es una
   respuesta entera del cupo para no aportar nada: presenta el dato y cierra.
 
+**El alta de workspaces por interfaz: tres cosas que la rompen.** Es la única vía que da espacios
+con cupo (los de `createSpace` nacen sin él), así que conviene tenerla fina:
+
+1. **El conmutador de espacios no se abre con `click()`.** Notion solo reacciona a eventos de
+   confianza: hay que pulsarlo por CDP (`Input.dispatchMouseEvent`, con el `mouseMoved` previo).
+   Con `el.click()` no pasa nada y parece que el menú no existe.
+2. **"New workspace" está al final de la lista de TODOS tus espacios.** Con diez workspaces queda
+   fuera de la vista: el texto aparece en el DOM (y engaña a cualquier comprobación por texto) pero
+   no hay nada que pulsar hasta bajar el scroll del overlay.
+3. **Los ítems del menú tampoco responden al `click()` del DOM**, por lo mismo: localiza la caja del
+   elemento visible y pulsa por CDP.
+
+Y el 429 de `createSpace` es **real y por cuenta** (`TooManyRequestsError`): unas cuantas creaciones
+seguidas lo activan y hay que esperar. No lo confundas con un fallo de interfaz — mira si la sesión
+sigue viva antes de apartar la cuenta una hora.
+
 **Y sube la oferta, no solo el ahorro.** El cupo va por workspace, así que el colchón del pool ES
 la reserva: con el mínimo en 3 se secaba a las pocas peticiones. Se configura en `cli-state.json`
 (`poolMinimo`) y el mantenimiento repone solo, repartiendo la creación entre cuentas y respetando

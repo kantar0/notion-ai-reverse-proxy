@@ -126,23 +126,61 @@ async function medir(spaceId) {
   }).catch(() => ({ cupo: false, plan: 'desconocido' }))
 }
 
-const jsClick = (txt, sw = false) => page.evaluate(({ t, sw }) => {
-  for (const d of [...document.querySelectorAll('[role="dialog"],[role="menu"]')].reverse()) {
-    const c = [...d.querySelectorAll('*')].filter(e => { const s = (e.innerText || '').trim(); return sw ? s.startsWith(t) : s === t })
-    if (!c.length) continue
-    let el = c[c.length - 1], p = el
-    for (let i = 0; i < 4 && p; i++) { const r = p.getAttribute('role'); if (r === 'menuitem' || r === 'button') { el = p; break } p = p.parentElement }
-    el.click(); return true
-  }
-  return false
-}, { t: txt, sw })
+// Igual que el conmutador: el click() del DOM no dispara nada en los menus de
+// Notion. Se localiza la caja del elemento VISIBLE y se pulsa por CDP.
+async function jsClick(txt, sw = false) {
+  const caja = await page.evaluate(({ t, sw }) => {
+    const dentro = []
+    for (const d of [...document.querySelectorAll('[role="dialog"],[role="menu"],.notion-overlay-container')].reverse())
+      dentro.push(...d.querySelectorAll('*'))
+    const todos = dentro.length ? dentro : [...document.querySelectorAll('div,button,span,a')]
+    const c = todos.filter(e => {
+      const s = (e.innerText || e.textContent || '').trim()
+      if (!(sw ? s.startsWith(t) : s.toLowerCase() === t.toLowerCase())) return false
+      const r = e.getBoundingClientRect()
+      return r.width > 10 && r.height > 8 && r.top >= 0 && r.bottom <= innerHeight
+    })
+    if (!c.length) return null
+    c.sort((a, b) => { const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect(); return ra.width * ra.height - rb.width * rb.height })
+    const r = c[0].getBoundingClientRect()
+    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+  }, { t: txt, sw })
+  if (!caja) return false
+  if (!cdpPagina) cdpPagina = await ctx.newCDPSession(page)
+  for (const st of [{ type: 'mouseMoved', button: 'none', buttons: 0, clickCount: 0 },
+                    { type: 'mousePressed', button: 'left', buttons: 1, clickCount: 1 },
+                    { type: 'mouseReleased', button: 'left', buttons: 0, clickCount: 1 }])
+    await cdpPagina.send('Input.dispatchMouseEvent', { x: caja.x, y: caja.y, ...st })
+  return true
+}
 const menuTieneNuevo = () => page.evaluate(() =>
   [...document.querySelectorAll('[role="dialog"],[role="menu"]')].some(d => /New workspace|Nuevo espacio/i.test(d.innerText || '')))
-const pulsarSwitcher = () => page.evaluate(() => {
-  const el = [...document.querySelectorAll('[role="button"],div[tabindex],button')]
-    .find(e => { const r = e.getBoundingClientRect(); return r.top < 40 && r.left < 40 && r.width > 150 && r.height > 20 })
-  if (!el) return false
-  el.click(); return true
+// El conmutador de espacios NO se abre con click(): Notion solo reacciona a
+// eventos de confianza, que unicamente llegan por CDP.
+let cdpPagina = null
+async function pulsarSwitcher() {
+  const caja = await page.evaluate(() => {
+    const el = [...document.querySelectorAll('div[role="button"],[role="button"],div[tabindex],button')]
+      .find(e => { const r = e.getBoundingClientRect(); return r.top < 45 && r.left < 40 && r.width > 150 && r.height > 20 })
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+  })
+  if (!caja) return false
+  if (!cdpPagina) cdpPagina = await ctx.newCDPSession(page)
+  for (const st of [{ type: 'mouseMoved', button: 'none', buttons: 0, clickCount: 0 },
+                    { type: 'mousePressed', button: 'left', buttons: 1, clickCount: 1 },
+                    { type: 'mouseReleased', button: 'left', buttons: 0, clickCount: 1 }])
+    await cdpPagina.send('Input.dispatchMouseEvent', { x: caja.x, y: caja.y, ...st })
+  return true
+}
+// El menu lista TODOS los espacios de la cuenta y "New workspace" queda al
+// final, fuera de la vista: sin bajar el scroll el texto existe en el DOM pero
+// no hay nada que pulsar.
+const bajarMenu = () => page.evaluate(() => {
+  for (const ov of document.querySelectorAll('[role="dialog"],[role="menu"],.notion-overlay-container'))
+    for (const e of [ov, ...ov.querySelectorAll('*')])
+      if (e.scrollHeight > e.clientHeight + 20) e.scrollTop = e.scrollHeight
 })
 
 async function crearUno(previos) {
@@ -150,7 +188,8 @@ async function crearUno(previos) {
   await sleep(9000)
   let abrio = false
   for (let i = 1; i <= 3 && !abrio; i++) {
-    await pulsarSwitcher(); await sleep(3000)
+    await pulsarSwitcher(); await sleep(3500)
+    await bajarMenu(); await sleep(1200)
     abrio = await menuTieneNuevo()
     if (!abrio) { await page.mouse.click(135, 20); await sleep(2500); abrio = await menuTieneNuevo() }
   }
