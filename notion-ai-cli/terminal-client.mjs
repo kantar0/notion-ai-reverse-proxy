@@ -294,6 +294,17 @@ async function main() {
     let currentProgress = null
     let lastProgressKey = ''
     let contextPrinted = false
+    const resumirAccion=(t)=>{
+      const x=String(t||'').replace(/\s+/g,' ').trim()
+      if(x.length<=60) return x
+      if(/Get-Process|tasklist/i.test(x)) return 'consultando procesos'
+      if(/FreePhysicalMemory|Win32_OperatingSystem|Get-Volume/i.test(x)) return 'consultando el sistema'
+      if(/MainWindowTitle/i.test(x)) return 'mirando las ventanas abiertas'
+      if(/Start-Process|start /i.test(x)) return 'abriendo un programa'
+      if(/taskkill|Stop-Process/i.test(x)) return 'cerrando un programa'
+      if(/Get-ChildItem|dir /i.test(x)) return 'listando archivos'
+      return x.slice(0,57)+'…'
+    }
     const frames = ['|','/','-','\\']
     let frame = 0
     const clearStatus=()=>process.stdout.write('\r\x1b[2K')
@@ -304,7 +315,7 @@ async function main() {
     const draw=()=>{
       if(payload.action!=='prompt')return
       const seconds=Math.floor((Date.now()-workingStarted)/1000)
-      const msg=currentProgress?.action||currentProgress?.message||'Trabajando'
+      const msg=resumirAccion(currentProgress?.action||currentProgress?.message||'Trabajando')
       const ancho=Math.max(20,(process.stdout.columns||80)-1)
       const cola=' | '+seconds+'s'
       const cabeza=frames[frame++%frames.length]+' '

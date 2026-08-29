@@ -636,8 +636,19 @@ function formatAccountsText(accounts){
 // Se guarda tambien el plan al que pertenece el cupo agotado: un espacio con el
 // trial de Business seco no dice nada del plan Free de esa cuenta (ver
 // clasificarAviso), y sin ese dato el CLI daba la cuenta entera por perdida.
+// Consumo real: sin esto no hay forma de saber cuánto dura el cupo salvo
+// esperar a quedarse sin él.
+function apuntarConsumo(campo){
+  try{
+    const st=loadState()
+    const c=st.consumo||{desde:new Date().toISOString(),peticiones:0,espaciosSecos:0}
+    c[campo]=(c[campo]||0)+1
+    saveState({consumo:c,version:VERSION})
+  }catch{}
+}
 function marcarAgotado(key,plan='free'){
   if(!key) return
+  apuntarConsumo('espaciosSecos')
   const st=loadState()
   saveState({quotaExhausted:{...(st.quotaExhausted||{}),[key]:{t:Date.now(),plan}},version:VERSION})
 }
@@ -735,6 +746,18 @@ function limpiarPestanas(){
   hijo.on('error',()=>{limpiezaCorriendo=false})
 }
 let poolCorriendo=false, poolUltimo=0, poolPendiente=null
+// Notion corta la creación de workspaces por ritmo y no avisa de cuándo la
+// levanta. En vez de dejarlo a que alguien lo pruebe a mano, se reintenta cada
+// media hora mientras el colchón esté por debajo del mínimo: el día que ceda,
+// el pool se repone solo.
+setInterval(()=>{
+  try{
+    const st=loadState()
+    const conCupo=(st.conCupoIds||[]).length
+    const minimo=Number(st.poolMinimo)||12
+    if(conCupo<minimo) lanzarPoolMaintain('ciclo de reposición')
+  }catch{}
+},30*60*1000).unref?.()
 // El colchon de workspaces se repone por evento (al quedarse sin cupo), no
 // cada media hora.
 function lanzarPoolMaintain(motivo='ciclo'){
@@ -2648,7 +2671,15 @@ async function runHiddenPromptWithRotation(userText,progress=()=>{}){
         tried.clear()
         continue
       }
-      throw new Error(String(error.message||error)+' | Sin cupo en los workspaces conocidos y no pude crear otro (Notion limita cuántos se crean seguidos). Reintenta en un rato o conecta otra cuenta con /popup.')
+      // Sin cupo en ningún sitio: el usuario necesita saber QUÉ hacer, no un
+      // error técnico encadenado.
+      const st=loadState()
+      const cortadas=Object.entries(st.spaceCreateBlockedBy||{}).filter(([,t])=>t>Date.now()).map(([e])=>e)
+      const partes=['Se acabó el cupo de IA en todos los workspaces disponibles.']
+      partes.push('Cada workspace del plan Free trae 20 respuestas y no se reponen: hay que añadir workspaces o cuentas.')
+      if(cortadas.length) partes.push('Ahora mismo Notion no deja crear más en: '+cortadas.join(', ')+' (corta por ritmo; se reintenta solo cada 30 min).')
+      partes.push('Lo que más suma: inicia sesión en otra cuenta de Notion en el navegador y el CLI la detecta sola.')
+      throw new Error(partes.join(' '))
     }
   }
 }
@@ -3861,6 +3892,25 @@ async function handleBridgeRequest(workingPath,req){
       const bloq=Object.entries(st.spaceCreateBlockedBy||{}).filter(([,t])=>t>Date.now()).map(([e])=>e)
       const lineas=[ps?('Ultima medicion: '+ps.conCupo+'/'+ps.minimo+' workspaces con cupo · '+ps.creados+' creado(s) · '+new Date(ps.at).toLocaleString()):'Sin mediciones todavia']
       if(bloq.length) lineas.push('Cuentas cortadas por ritmo de Notion: '+bloq.join(', '))
+      // Cuánto dura: con el consumo real medido, no con suposiciones.
+      const c=st.consumo||{}
+      const conCupo=(st.conCupoIds||[]).length
+      if(c.peticiones){
+        const horas=Math.max(0.1,(Date.now()-new Date(c.desde||Date.now()).getTime())/3600000)
+        const porHora=c.peticiones/horas
+        const porEspacio=c.espaciosSecos?(c.peticiones/c.espaciosSecos):null
+        lineas.push('Consumo medido: '+c.peticiones+' peticiones · '+(c.espaciosSecos||0)+' workspaces agotados'+
+          (porEspacio?(' · ~'+porEspacio.toFixed(1)+' peticiones por workspace'):''))
+        if(porEspacio&&conCupo){
+          const quedan=Math.round(porEspacio*conCupo)
+          lineas.push('Quedan ~'+quedan+' peticiones ('+conCupo+' workspaces × '+porEspacio.toFixed(1)+')'+
+            (porHora>0.2?(' · a tu ritmo ('+porHora.toFixed(1)+'/h) duran ~'+(quedan/porHora).toFixed(1)+' h'):''))
+        }else if(conCupo){
+          lineas.push('Quedan '+conCupo+' workspaces con cupo (hasta 20 respuestas cada uno si están sin estrenar).')
+        }
+      }else if(conCupo){
+        lineas.push('Quedan '+conCupo+' workspaces con cupo (hasta 20 respuestas cada uno). Aún sin consumo medido.')
+      }
       lineas.push(lanzado?'Mantenimiento en marcha (mide, crea lo que falte, conecta MCP y sincroniza).':'Ya habia un mantenimiento en marcha.')
       result={ok:true,id:req.id,text:lineas.join('\n'),meta:ps}
       log(`POOL ${req.id}`)
@@ -3919,6 +3969,7 @@ async function handleBridgeRequest(workingPath,req){
         if(sp) saveState({selectedChatUrl:spaceChatUrl(sp),threadManuallySelected:false,version:VERSION})
       }catch{}}
     fs.writeFileSync(responsePath,JSON.stringify(result,null,2))
+    if(result&&result.ok!==false) apuntarConsumo('peticiones')
   }catch(error){
     // Al usuario no le sirve "Timeout Runtime.enable": se traduce lo que puede
     // hacer al respecto y el detalle tecnico queda en el log.
