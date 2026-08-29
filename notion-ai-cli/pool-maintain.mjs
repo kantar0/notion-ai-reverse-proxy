@@ -217,7 +217,26 @@ const bajarMenu = () => page.evaluate(() => {
       if (e.scrollHeight > e.clientHeight + 20) e.scrollTop = e.scrollHeight
 })
 
+// Crea por API el onboarding completo. Devuelve {id} o {rateLimited:true} en el
+// 429, que es la señal para NO volver a intentar en un buen rato (martillearlo
+// mantenía el bloqueo).
+async function crearPorApi() {
+  return await page.evaluate(async () => {
+    const uuid = () => crypto.randomUUID()
+    const spaceId = uuid()
+    const r = await fetch('/api/v3/createSpace', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ spaceId, initialUseCase: 'personal', name: 'Pool ' + spaceId.slice(0, 6), planType: 'personal', isPublic: false }) })
+    if (r.status === 429) return { rateLimited: true }
+    if (r.status !== 200) return { error: r.status }
+    return { id: spaceId }
+  }).catch(() => ({ error: 'evaluate' }))
+}
 async function crearUno(previos) {
+  // La API es instantánea; solo si da 429 se recurre a la UI (que acaba en el
+  // mismo endpoint, así que también fallará, pero se intenta por si acaso).
+  const api = await crearPorApi()
+  if (api.id) return api.id
+  if (api.rateLimited) return { rateLimited: true }
   await page.goto(urlEspacio(), { waitUntil: 'commit', timeout: 60000 }).catch(() => {})
   await sleep(9000)
   let abrio = false
@@ -241,6 +260,7 @@ async function crearUno(previos) {
 // minutos reintentando en la que está cortada mientras otras sí pueden crear.
 const st0 = readJson(STATE) || {}
 const bloqueo = { ...(st0.spaceCreateBlockedBy || {}) }
+const backoff = { ...(st0.createBackoff || {}) }
 const activa = (st0.lastSelectedAccount && st0.lastSelectedAccount.email) || (st0.lastActiveAccount && st0.lastActiveAccount.email) || null
 
 // Empezar por la cuenta activa: es la que va a usar el panel ahora mismo.
@@ -278,6 +298,17 @@ for (const c of cuentas) {
   while (!SOLO_MEDIR && conCupo < MINIMO && !(bloqueo[c.email] > Date.now())) {
     const previos = (await listSpaces()).spaces.map(x => x.id)
     const nuevo = await crearUno(previos)
+    if (nuevo && nuevo.rateLimited) {
+      // Backoff: cada 429 dobla la espera (30m→1h→2h→4h, tope 6h) y se recuerda,
+      // para no volver a tocar el endpoint y perpetuar el bloqueo.
+      const prev = Number(st0.createBackoff?.[c.email]) || 30 * 60 * 1000
+      const siguiente = Math.min(prev * 2, 6 * 60 * 60 * 1000)
+      bloqueo[c.email] = Date.now() + siguiente
+      backoff[c.email] = siguiente
+      say('  ' + c.email + ': Notion rate-limita createSpace (429). Backoff a ' + Math.round(siguiente / 60000) + ' min sin reintentar.')
+      break
+    }
+    if (nuevo && typeof nuevo === 'object') break   // otro error de crearUno
     if (!nuevo) {
       // Antes se daba por hecho que era el 429 de ritmo y se apartaba la cuenta
       // una hora. Puede ser eso... o que el flujo de alta de Notion haya
@@ -295,6 +326,7 @@ for (const c of cuentas) {
     creados.push({ email: c.email, spaceId: nuevo, ...m })
     tocadas.add(c.email)
     if (m.cupo) conCupo++
+    delete backoff[c.email]   // creó bien: el rate-limit cedió, se resetea el backoff
   }
 }
 
@@ -326,7 +358,7 @@ for (const d of detalle) {
   if (d.cupo) delete memoria[key]
   else if (d.plan === 'business-trial' || d.plan === 'free-agotado' || d.plan === 'ai-desactivada') memoria[key] = { t: Date.now(), plan: d.plan === 'business-trial' ? 'business-trial' : d.plan === 'ai-desactivada' ? 'ai-desactivada' : 'free' }
 }
-writeState({ quotaExhausted: memoria, spaceCreateBlockedBy: bloqueo, conCupoIds: detalle.filter(x => x && x.cupo && x.spaceId).map(x => x.spaceId), poolStatus: { at: new Date().toISOString(), conCupo, minimo: MINIMO, creados: creados.length } })
+writeState({ quotaExhausted: memoria, spaceCreateBlockedBy: bloqueo, createBackoff: backoff, conCupoIds: detalle.filter(x => x && x.cupo && x.spaceId).map(x => x.spaceId), poolStatus: { at: new Date().toISOString(), conCupo, minimo: MINIMO, creados: creados.length } })
 const salida = { conCupo, minimo: MINIMO, creados, detalle, sesionActiva: activa }
 if (JSON_OUT) console.log(JSON.stringify(salida))
 else say('pool: ' + conCupo + '/' + MINIMO + ' con cupo · ' + creados.length + ' creado(s)')

@@ -776,7 +776,12 @@ setInterval(()=>{
     const st=loadState()
     const conCupo=(st.conCupoIds||[]).length
     const minimo=Number(st.poolMinimo)||12
-    if(conCupo<minimo) lanzarPoolMaintain('ciclo de reposición')
+    // Solo si hay algo que hacer Y no todas las cuentas están en backoff por el
+    // 429: martillear createSpace cuando Notion lo rechaza perpetúa el bloqueo.
+    const cuentasEnBackoff=Object.values(st.spaceCreateBlockedBy||{}).filter(t=>t>Date.now()).length
+    const emails=[...new Set((st.accounts||[]).map(a=>a&&a.email).filter(Boolean))].length||1
+    const todasCortadas=cuentasEnBackoff>=emails
+    if(conCupo<minimo&&!todasCortadas) lanzarPoolMaintain('ciclo de reposición')
   }catch{}
 },30*60*1000).unref?.()
 // El colchon de workspaces se repone por evento (al quedarse sin cupo), no
@@ -3961,6 +3966,18 @@ async function handleBridgeRequest(workingPath,req){
       lineas.push(lanzado?'Mantenimiento en marcha (mide, crea lo que falte, conecta MCP y sincroniza).':'Ya habia un mantenimiento en marcha.')
       result={ok:true,id:req.id,text:lineas.join('\n'),meta:ps}
       log(`POOL ${req.id}`)
+    }
+    else if(req.action==='force-pool'){
+      // Ignora el backoff del 429 y reintenta crear ya: útil justo después de
+      // cambiar de IP (VPN), que es lo que puede levantar el rate-limit.
+      const st=loadState()
+      delete st.spaceCreateBlockedBy; delete st.createBackoff
+      saveState({spaceCreateBlockedBy:{},createBackoff:{},version:VERSION})
+      const lanzado=lanzarPoolMaintain('forzado tras cambio de IP')
+      result={ok:true,id:req.id,text:lanzado
+        ? 'Backoff reseteado. Intentando crear workspaces ahora (si cambiaste de IP y el 429 era por IP, ahora debería crear). Mira el log o usa /cupo en un minuto.'
+        : 'Ya había un mantenimiento en marcha; el backoff quedó reseteado.'}
+      log('FORCE_POOL '+req.id)
     }
     else if(req.action==='new-workspace'){
       const r=spawnSync(process.execPath,[path.join(DIR,'space-ensure.mjs'),'--force'],{cwd:DIR,encoding:'utf8',windowsHide:true,timeout:900000})

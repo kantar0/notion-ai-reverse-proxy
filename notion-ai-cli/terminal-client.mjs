@@ -41,7 +41,7 @@ const MODEL_OPTIONS = [
   'oval-kumquat-medium'
 ]
 const COMMANDS = [
-  '/ayuda','/cuenta','/quien','/conectar','/lista','/usar','/sig','/estado','/uso','/salud','/estados','/plan','/rotacion','/descubrir','/discover','/nueva-cuenta','/nuevo-workspace','/pool','/popup','/proxy','/salir',
+  '/ayuda','/cuenta','/quien','/conectar','/lista','/usar','/sig','/estado','/uso','/salud','/crear-lote','/estados','/plan','/rotacion','/descubrir','/discover','/nueva-cuenta','/nuevo-workspace','/pool','/popup','/proxy','/salir',
   '/pin','/pin-current','/thread','/threads','/welcome','/st','/status','/account','/cuenta','/accounts','/cuentas','/connect-account','/conectar-cuenta','/use-account','/usar-cuenta','/next-account','/siguiente-cuenta','/ai-status','/cuota','/ai-status-all','/cuotas','/rotation-plan','/plan-rotacion','/auto-rotate','/rotacion-auto',
   '/cls','/clear-selection','/ms','/memory-show','/mr','/memory-reset','/msave','/memory-save',
   '/sp','/set-project','/cp','/clear-project','/model','/modelo','/set-model','/models','/modelos','/mode','/get-mode',
@@ -198,6 +198,7 @@ function parseCommand(line) {
   if (line === '/nueva-cuenta' || line === '/new-account' || line === '/add-account') return { action: 'new-account' }
   if (line === '/nuevo-workspace' || line === '/new-workspace' || line === '/nuevo-espacio') return { action: 'new-workspace' }
   if (line === '/pool' || line === '/cupo') return { action: 'pool' }
+  if (line === '/crear-lote' || line === '/forzar-pool') return { action: 'force-pool' }
   if (line === '/auto-rotate' || line === '/rotacion-auto') return { action: 'get-auto-rotate' }
   if (line.startsWith('/auto-rotate ')) return { action: 'set-auto-rotate', value: line.slice(13).trim() }
   if (line.startsWith('/rotacion-auto ')) return { action: 'set-auto-rotate', value: line.slice(15).trim() }
