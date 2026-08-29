@@ -2522,7 +2522,11 @@ function abrirLocal(objetivo,cwd){
 // al pasar guiones que ya llevan las suyas.
 function psEval(guion){
   return new Promise(resolve=>{
-    const ps=spawn('powershell',['-NoProfile','-Command',String(guion)],{windowsHide:true,stdio:['ignore','pipe','pipe']})
+    // -EncodedCommand (UTF-16LE en base64): pasar el guion con -Command hacia que
+    // Windows re-serializara los argumentos y rompiera las comillas internas, asi
+    // que guiones que funcionaban a mano devolvian vacio.
+    const b64=Buffer.from(String(guion),'utf16le').toString('base64')
+    const ps=spawn('powershell',['-NoProfile','-EncodedCommand',b64],{windowsHide:true,stdio:['ignore','pipe','pipe']})
     let out='',err=''
     ps.stdout.on('data',d=>{out+=String(d)})
     ps.stderr.on('data',d=>{err+=String(d)})
@@ -2558,6 +2562,26 @@ async function ejecutarOrden(tool,args){
 const APPS = { chrome:'chrome', 'google chrome':'chrome', edge:'msedge', firefox:'firefox',
   notepad:'notepad', bloc:'notepad', explorador:'explorer', explorer:'explorer',
   calculadora:'calc', spotify:'spotify', discord:'discord', code:'code', vscode:'code' }
+// Busca un programa por nombre en el Escritorio y en los menus de Inicio (del
+// usuario y de la maquina). Antes solo miraba el Escritorio y a las apps
+// conocidas les anteponia esa carpeta, asi que "discord" acababa en la ruta
+// inventada ~/Desktop/discord.
+async function buscarPrograma(consulta){
+  const q=String(consulta||'').trim()
+  if(!q) return null
+  const guion='$q='+JSON.stringify(q)+';'+
+    '$dirs=@("$env:USERPROFILE\Desktop","$env:APPDATA\Microsoft\Windows\Start Menu\Programs","$env:ProgramData\Microsoft\Windows\Start Menu\Programs");'+
+    '$pal=$q -split "\s+" | Where-Object { $_.Length -gt 2 };'+
+    '$r=Get-ChildItem $dirs -Recurse -Include *.lnk,*.exe -ErrorAction SilentlyContinue |'+
+    ' ForEach-Object { $n=$_.BaseName.ToLower(); $pts=0; foreach($p in $pal){ if($n -like "*$($p.ToLower())*"){$pts++} };'+
+    '   if($pts -gt 0){ [pscustomobject]@{ Ruta=$_.FullName; Pts=$pts; Len=$n.Length } } } |'+
+    ' Sort-Object -Property @{Expression="Pts";Descending=$true},@{Expression="Len";Descending=$false} |'+
+    ' Select-Object -First 1 -ExpandProperty Ruta;'+
+    'if($r){$r}else{"NADA"}'
+  const r=await psEval(guion)
+  const ruta=String(r.texto||'').trim().split(/\r?\n/).pop()
+  return (!ruta||ruta==='NADA')?null:ruta
+}
 async function aperturaEnPc(texto){
   // Deteccion por palabras, no por una expresion larga: la version con regex
   // no casaba en ejecucion y fallaba en silencio.
@@ -2577,38 +2601,23 @@ async function aperturaEnPc(texto){
   if(!objetivo||objetivo.length>60) return null
   const clave=objetivo.toLowerCase()
   // 1) aplicacion conocida
-  // Coincidencia flexible: el usuario dice "bloc de notas" o "el google chrome",
-  // no la clave exacta.
+  // 1) aplicacion conocida: se pasa el nombre TAL CUAL a Start-Process (antes se
+  //    le anteponia el Escritorio y "discord" acababa en ~/Desktop/discord).
   let destino=APPS[clave]||null
   if(!destino){
     const k=Object.keys(APPS).filter(x=>clave===x||clave.includes(x)).sort((a,b)=>b.length-a.length)[0]
     if(k) destino=APPS[k]
   }
-  // 2) si no, se busca un acceso directo o ejecutable que encaje (escritorio)
+  let esRutaCompleta=false
+  // 2) si no, se busca en Escritorio y menus de Inicio (encuentra Discord, Spotify...)
   if(!destino){
-    // search_files devuelve resultados irrelevantes (busca dentro de node_modules
-    // y demas); el listado del escritorio es lo que de verdad encuentra el acceso
-    // directo.
-    let candidatos=[]
-    for(const carpeta of ['~/Desktop','~/AppData/Roaming/Microsoft/Windows/Start Menu/Programs']){
-      const r=await ejecutarHerramienta('list_files',{path:carpeta}).catch(()=>null)
-      try{ const j=JSON.parse(r&&r.texto||'[]'); if(Array.isArray(j)) candidatos.push(...j.map(x=>x.name).filter(Boolean)) }catch{}
-      if(candidatos.length) break
-    }
-    // Se puntua por palabras coincidentes en vez de exigirlas todas: el usuario
-    // dice "haxball aaa client" y el acceso directo se llama "HaxBall AAA.lnk".
-    const palabras=clave.split(/\s+/).filter(p=>p.length>2)
-    const puntuado=candidatos
-      .filter(c=>/\.(lnk|exe|bat|cmd|url)$/i.test(String(c)))
-      .map(c=>{ const s2=String(c).toLowerCase(); return {c,pts:palabras.filter(p=>s2.includes(p)).length} })
-      .filter(x=>x.pts>0)
-      .sort((a,b)=>b.pts-a.pts||String(a.c).length-String(b.c).length)
-    if(puntuado.length) destino=String(puntuado[0].c)
+    const hallado=await buscarPrograma(objetivo)
+    if(hallado){ destino=hallado; esRutaCompleta=true }
   }
   if(!destino) return null
   // Ruta COMPLETA: con el nombre a secas Start-Process no lo encuentra aunque se
   // le pase el directorio de trabajo.
-  const ruta=/^[A-Za-z]:|[\/]/.test(destino)?destino:path.join(os.homedir(),'Desktop',destino)
+  const ruta=(esRutaCompleta||/^[A-Za-z]:/.test(destino))?destino:destino
   const r=await ejecutarLocal('start "'+ruta+'"','~/Desktop')
   log('[pc] abrir '+destino+' -> '+(r.ok?'ok':'fallo'))
   // Se recuerda para poder atender "cierralo" despues, sin nombrar nada.
@@ -2623,6 +2632,49 @@ const NO_CERRAR = ['explorer','node','electron','msedge','chrome.*headless','pow
 function esProtegido(nombre){
   const n=String(nombre||'').toLowerCase()
   return NO_CERRAR.some(x=>new RegExp('^'+x+'$').test(n))
+}
+// Acciones de ventana (minimizar, maximizar, restaurar). Faltaban: "minimiza el
+// discord" acababa en el modelo, que no tiene forma de hacerlo.
+const ACCIONES_VENTANA = { minimiza:6, minimizar:6, minimizalo:6, minimízalo:6,
+  maximiza:3, maximizar:3, maximizalo:3, maximízalo:3,
+  restaura:9, restaurar:9, restauralo:9, restáuralo:9 }
+async function ventanaEnPc(texto){
+  const bruto=String(texto||'').trim(), bajo=bruto.toLowerCase()
+  let verbo=null, corte=-1
+  for(const v of Object.keys(ACCIONES_VENTANA)){
+    const i=bajo.indexOf(v)
+    if(i<0) continue
+    const sig=bajo[i+v.length]
+    if(sig!==undefined&&sig!==' '&&sig!=='.'&&sig!==',') continue
+    if(corte<0||i<corte){ corte=i; verbo=v }
+  }
+  if(!verbo) return null
+  let objetivo=bruto.slice(corte+verbo.length).trim()
+    .replace(/^(el|la|los|las|un|una)\s+/i,'')
+    .replace(/^(programa|aplicaci[oó]n|app|cliente|ventana)\s+(de\s+)?/i,'')
+    .replace(/[.?!,]+$/,'').trim()
+  if(/lo$|la$/.test(verbo)&&!objetivo){
+    const ult=loadState().ultimoAbierto
+    objetivo=ult&&ult.objetivo||''
+  }
+  if(!objetivo) return 'No sé qué ventana: dime el nombre del programa'
+  const clave=objetivo.toLowerCase()
+  let proceso=APPS[clave]||null
+  if(!proceso){
+    const k=Object.keys(APPS).filter(x=>clave===x||clave.includes(x)).sort((a,b)=>b.length-a.length)[0]
+    if(k) proceso=APPS[k]
+  }
+  if(!proceso) proceso=clave.split(/\s+/)[0]
+  const modo=ACCIONES_VENTANA[verbo]
+  const guion='Add-Type -Name W -Namespace N -MemberDefinition \'[DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h,int c);\';'+
+    '$p=Get-Process '+JSON.stringify(proceso)+' -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 };'+
+    'if($p){ foreach($x in $p){ [N.W]::ShowWindowAsync($x.MainWindowHandle,'+modo+') | Out-Null }; "HECHO:"+$p.Count } else { "SIN_VENTANA" }'
+  const r=await psEval(guion)
+  const salida=String(r.texto||'')
+  log('[pc] ventana '+verbo+' '+proceso+' -> '+salida.trim().slice(0,30))
+  if(/HECHO:/.test(salida)) return 'HECHO por el CLI: '+verbo+' '+objetivo+' ('+proceso+')'
+  if(/SIN_VENTANA/.test(salida)) return 'NO se pudo: '+objetivo+' no tiene ventana abierta'
+  return 'NO se pudo '+verbo+' '+objetivo+': '+salida.slice(0,120)
 }
 async function cierreEnPc(texto){
   const bruto=String(texto||'').trim(), bajo=bruto.toLowerCase()
@@ -2688,7 +2740,8 @@ async function processPrompt(userText, progress=()=>{}) {
     let ultimoResultado=null
     const ordenesVistas=new Set()
     // Si la peticion nombra una ruta, se resuelve YA y se le da hecha.
-    const cerrado=await cierreEnPc(userText).catch(e=>{log('[pc] cierre falló: '+String(e&&e.message||e).slice(0,120));return null})
+    const ventana=await ventanaEnPc(userText).catch(e=>{log('[pc] ventana falló: '+String(e&&e.message||e).slice(0,120));return null})
+    const cerrado=ventana||await cierreEnPc(userText).catch(e=>{log('[pc] cierre falló: '+String(e&&e.message||e).slice(0,120));return null})
     const abierto=cerrado||await aperturaEnPc(userText).catch(e=>{log('[pc] apertura falló: '+String(e&&e.message||e).slice(0,120));return null})
     const escrito=abierto||await escrituraEnPc(userText).catch(e=>{log('[pc] escritura falló: '+String(e&&e.message||e).slice(0,120));return null})
     // Una accion ya ejecutada (abrir, escribir) NO necesita que Notion redacte la
