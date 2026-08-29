@@ -282,6 +282,24 @@ pestaña; con 21 abiertas el motor llegó a **4,4 GB**. `tabs-clean.mjs` deja un
 daemon lo lanza tras cada petición; con los límites de `start-notion-cdp.ps1`
 (`--renderer-process-limit=3`, sin extensiones, heap y cachés acotadas) baja a **~1 GB**.
 
+## 5.bis Cuánto cupo hay de verdad, y cómo medirlo sin gastarlo
+
+El plan Free da **20 respuestas de IA por workspace**, de una sola vez, **por workspace y no por
+miembro**, y **no se reponen nunca**. De ahí salen tres conclusiones que ahorran días de trabajo:
+
+- **Invitar otras cuentas a un workspace agotado no da cupo nuevo.** El límite viaja con el
+  workspace, no con quien lo usa.
+- **Reciclar los agotados no sirve**: no hay reset ni mensual ni de ningún tipo. El aviso Free
+  (*"You've run out of free AI responses"*) no lleva fecha, a diferencia del de Business.
+- **Cada respuesta desperdiciada cuesta un 5% del workspace.** Por eso las fugas importan tanto:
+  con una respuesta por petición, un workspace rinde ~20 peticiones; con las fugas abiertas rendía
+  dos o tres.
+
+**Y no midas el cupo mirando si hay campo de escritura.** Un workspace agotado **también** lo pinta:
+contarlos como buenos hace que cada petición se pierda rotando por espacios secos. La comprobación
+fiable, y que no gasta ninguna respuesta, es **escribir un carácter sin enviar y mirar el botón**:
+si sigue deshabilitado, no hay cupo. Después se borra lo escrito y el chat queda como estaba.
+
 ## 6. Estrategia de cupo (plan Free)
 
 El cupo de Notion AI va **por workspace**, no por cuenta: cada espacio nuevo del plan Free

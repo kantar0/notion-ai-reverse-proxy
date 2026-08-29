@@ -113,17 +113,36 @@ async function medir(spaceId) {
     if (listo) break
     await sleep(500)
   }
-  return await page.evaluate(() => {
+  const base = await page.evaluate(() => {
     const t = document.body.innerText || ''
     const trial = /trial.?s? monthly AI allowance|tu (per[ií]odo de )?prueba/i.test(t)
     const free = /run out of free AI|free AI (trial|allowance)|cr[eé]ditos de Notion|podr[aá]s? usar la IA/i.test(t)
-    // Un espacio puede tener la IA apagada del todo ("AI is disabled for this
-    // workspace"): no es falta de cupo y no se arregla esperando, pero hay que
-    // descartarlo igual o la rotacion lo sigue eligiendo.
     const off = /AI is disabled for this workspace|IA (esta|está) deshabilitada/i.test(t)
-    return { cupo: document.querySelectorAll('[contenteditable="true"]').length > 0 && !trial && !free && !off,
-             plan: off ? 'ai-desactivada' : trial ? 'business-trial' : free ? 'free-agotado' : 'free' }
-  }).catch(() => ({ cupo: false, plan: 'desconocido' }))
+    const composer = document.querySelectorAll('[contenteditable="true"]').length > 0
+    return { composer, trial, free, off }
+  }).catch(() => ({ composer: false, trial: false, free: false, off: false }))
+  if (base.off) return { cupo: false, plan: 'ai-desactivada' }
+  if (base.trial) return { cupo: false, plan: 'business-trial' }
+  if (base.free) return { cupo: false, plan: 'free-agotado' }
+  if (!base.composer) return { cupo: false, plan: 'sin-composer' }
+  // Un espacio agotado TAMBIEN pinta el composer, asi que verlo no prueba nada:
+  // asi se contaban como buenos espacios secos y cada peticion se perdia
+  // rotando por ellos. La prueba real es escribir (sin enviar) y mirar si el
+  // boton de enviar se habilita. No gasta ninguna respuesta.
+  const vivo = await page.evaluate(async () => {
+    const c = [...document.querySelectorAll('[contenteditable="true"][role="textbox"], [contenteditable="true"]')].pop()
+    if (!c) return false
+    c.focus()
+    document.execCommand && document.execCommand('insertText', false, 'x')
+    await new Promise(r => setTimeout(r, 1200))
+    const b = document.querySelector('[data-testid="agent-send-message-button"],[aria-label="Submit AI message"]')
+    const activo = !!b && !(b.disabled || b.getAttribute('aria-disabled') === 'true')
+    // Dejar el composer como estaba: nada de basura en el chat del usuario.
+    c.focus()
+    for (let i = 0; i < 4; i++) document.execCommand && document.execCommand('delete', false)
+    return activo
+  }).catch(() => false)
+  return { cupo: vivo, plan: vivo ? 'free' : 'free-agotado' }
 }
 
 // Igual que el conmutador: el click() del DOM no dispara nada en los menus de
