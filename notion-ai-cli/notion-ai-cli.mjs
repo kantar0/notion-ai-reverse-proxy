@@ -2498,9 +2498,12 @@ function abrirLocal(objetivo,cwd){
                  '$destino=$sh.CreateShortcut('+JSON.stringify(objetivo)+').TargetPath;'+
                  '$sonda=[System.IO.Path]::GetFileNameWithoutExtension($destino);'):'$sonda=$null;')+
       'Start-Process -FilePath '+JSON.stringify(objetivo)+' -WorkingDirectory '+JSON.stringify(rutaReal(cwd||''))+';'+
-      'Start-Sleep -Seconds 3;'+
+      // Espera con reintentos: 3 s fijos daban falso negativo con aplicaciones
+      // que tardan en arrancar (Spotify abria y se reportaba "fallo").
+      ''+
       'if(-not $sonda){$sonda=@('+sonda.split(',').map(n=>JSON.stringify(n)).join(',')+')};'+
-      '$p=Get-Process -Name $sonda -ErrorAction SilentlyContinue;'+
+      '$p=$null; for($i=0;$i -lt 22 -and -not $p;$i++){ Start-Sleep -Milliseconds 900;'+   // ~20 s: hay apps pesadas (CurseForge, Spotify) que tardan
+      '  $p=Get-Process -Name $sonda -ErrorAction SilentlyContinue };'+
       'if($p){"ABIERTO:"+$p.Count}else{"LANZADO_SIN_VENTANA"}'
     const ps=spawn('powershell',['-NoProfile','-Command',guion],{windowsHide:true,stdio:['ignore','pipe','pipe']})
     let out='',err=''
@@ -2569,17 +2572,33 @@ const APPS = { chrome:'chrome', 'google chrome':'chrome', edge:'msedge', firefox
 async function buscarPrograma(consulta){
   const q=String(consulta||'').trim()
   if(!q) return null
-  const guion='$q='+JSON.stringify(q)+';'+
-    '$dirs=@("$env:USERPROFILE\Desktop","$env:APPDATA\Microsoft\Windows\Start Menu\Programs","$env:ProgramData\Microsoft\Windows\Start Menu\Programs");'+
-    '$pal=$q -split "\s+" | Where-Object { $_.Length -gt 2 };'+
-    '$r=Get-ChildItem $dirs -Recurse -Include *.lnk,*.exe -ErrorAction SilentlyContinue |'+
-    ' ForEach-Object { $n=$_.BaseName.ToLower(); $pts=0; foreach($p in $pal){ if($n -like "*$($p.ToLower())*"){$pts++} };'+
-    '   if($pts -gt 0){ [pscustomobject]@{ Ruta=$_.FullName; Pts=$pts; Len=$n.Length } } } |'+
-    ' Sort-Object -Property @{Expression="Pts";Descending=$true},@{Expression="Len";Descending=$false} |'+
-    ' Select-Object -First 1 -ExpandProperty Ruta;'+
-    'if($r){$r}else{"NADA"}'
+  // Se busca en TODO lo que Windows conoce, para no tener que ir anadiendo
+  // aplicaciones a mano cada vez que se instala una:
+  //   1. App Paths del registro (chrome, spotify, code... lo que se registra al instalar)
+  //   2. los menus de Inicio (usuario y maquina) y el Escritorio
+  //   3. %LOCALAPPDATA%\Programs (instalaciones por usuario, tipo Discord)
+  const guion=[
+    '$q='+JSON.stringify(q)+';',
+    '$pal=@($q -split "\\s+" | Where-Object { $_.Length -gt 2 });',
+    '$c=New-Object System.Collections.ArrayList;',
+    'foreach($k in @("HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths","HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths")){',
+    '  Get-ChildItem $k -ErrorAction SilentlyContinue | ForEach-Object {',
+    '    $n=[System.IO.Path]::GetFileNameWithoutExtension($_.PSChildName);',
+    '    $v=(Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue)."(default)";',
+    '    if($v){ [void]$c.Add([pscustomobject]@{N=$n.ToLower();R=$v}) } } }',
+    '$dirs=@("$env:USERPROFILE\\Desktop","$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs","$env:ProgramData\\Microsoft\\Windows\\Start Menu\\Programs","$env:LOCALAPPDATA\\Programs");',
+    'Get-ChildItem -Path $dirs -Recurse -File -ErrorAction SilentlyContinue |',
+    '  Where-Object { $_.Extension -eq ".lnk" -or $_.Extension -eq ".exe" } |',
+    '  ForEach-Object { [void]$c.Add([pscustomobject]@{N=$_.BaseName.ToLower();R=$_.FullName}) };',
+    '$m=$c | ForEach-Object { $x=$_; $p=0; foreach($w in $pal){ if($x.N -like "*$($w.ToLower())*"){$p++} };',
+    '  if($p -gt 0){ [pscustomobject]@{R=$x.R;P=$p;L=$x.N.Length} } } |',
+    '  Sort-Object -Property @{Expression="P";Descending=$true},@{Expression="L";Descending=$false} |',
+    '  Select-Object -First 1 -ExpandProperty R;',
+    'if($m){$m}else{"NADA"}'
+  ].join('')
   const r=await psEval(guion)
   const ruta=String(r.texto||'').trim().split(/\r?\n/).pop()
+  log('[buscar] '+q+' -> '+String(ruta||'(vacio)').slice(0,90))
   return (!ruta||ruta==='NADA')?null:ruta
 }
 async function aperturaEnPc(texto){
@@ -2587,17 +2606,31 @@ async function aperturaEnPc(texto){
   // no casaba en ejecucion y fallaba en silencio.
   const bruto=String(texto||'').trim()
   const bajo=bruto.toLowerCase()
-  const VERBOS=['abreme','abre','abrir','abrime','lanza','lanzar','ejecuta','ejecutar','inicia','iniciar','pon']
-  let corte=-1, largo=0
+  const VERBOS=['abrelo','ábrelo','abrela','ábrela','abreme','ábreme','abrime',
+    'abre','abrir','lanzalo','lánzalo','lanza','lanzar','ejecutalo','ejecútalo',
+    'ejecuta','ejecutar','inicialo','inícialo','inicia','iniciar','pon']
+  let corte=-1, largo=0, conPronombre=false
   for(const v of VERBOS){
-    const i=bajo.indexOf(v+' ')
-    if(i>=0&&(corte<0||i<corte)){ corte=i; largo=v.length }
+    const i=bajo.indexOf(v)
+    if(i<0) continue
+    const sig=bajo[i+v.length]
+    if(sig!==undefined&&sig!==' '&&sig!=='.'&&sig!==',') continue
+    if(corte<0||i<corte){ corte=i; largo=v.length; conPronombre=/lo$|la$|me$/.test(v) }
   }
   if(corte<0) return null
   let objetivo=bruto.slice(corte+largo).trim()
   objetivo=objetivo.replace(/^(el|la|los|las|un|una)\s+/i,'')
   objetivo=objetivo.replace(/^(programa|aplicaci[oó]n|app|archivo|fichero)\s+/i,'')
   objetivo=objetivo.replace(/[.?!,]+$/,'').trim()
+  // "abrelo" no nombra nada: se refiere a lo ultimo de lo que hablamos (lo que
+  // se abrio o se cerro). Sin esto la peticion caia en el modelo, que repetia
+  // ordenes viejas del hilo.
+  if(conPronombre||!objetivo||/^(eso|esto|aquello|ahora|ya|de nuevo|otra vez)$/i.test(objetivo)){
+    const ult=loadState().ultimoObjetivo||loadState().ultimoAbierto?.objetivo
+    if(!ult) return 'No sé qué abrir: dime el nombre del programa'
+    objetivo=typeof ult==='string'?ult:String(ult.objetivo||'')
+    log('[pc] pronombre -> último objetivo: '+objetivo)
+  }
   if(!objetivo||objetivo.length>60) return null
   const clave=objetivo.toLowerCase()
   // 1) aplicacion conocida
@@ -2621,7 +2654,7 @@ async function aperturaEnPc(texto){
   const r=await ejecutarLocal('start "'+ruta+'"','~/Desktop')
   log('[pc] abrir '+destino+' -> '+(r.ok?'ok':'fallo'))
   // Se recuerda para poder atender "cierralo" despues, sin nombrar nada.
-  if(r.ok) saveState({ultimoAbierto:{objetivo,destino,at:Date.now()},version:VERSION})
+  if(r.ok) saveState({ultimoAbierto:{objetivo,destino,at:Date.now()},ultimoObjetivo:objetivo,version:VERSION})
   return (r.ok?'HECHO por el CLI: ':'NO se pudo abrir: ')+destino+' — '+String(r.texto||'').slice(0,200)
 }
 // Cerrar programas, tambien sin depender del modelo: pedia
@@ -2728,6 +2761,7 @@ async function cierreEnPc(texto){
   const r=await psEval('$p=Get-Process '+JSON.stringify(proceso)+' -ErrorAction SilentlyContinue; if($p){$n=$p.Count; $p | Stop-Process -Force; "CERRADO:"+$n}else{"NO_ESTABA"}')
   const salida=String(r.texto||'')
   log('[pc] cerrar '+proceso+' -> '+salida.trim().slice(0,40))
+  saveState({ultimoObjetivo:objetivo,version:VERSION})   // para un "abrelo" despues
   if(/CERRADO:/.test(salida)) return 'HECHO por el CLI: cerrado '+objetivo+' ('+proceso+', '+(salida.match(/CERRADO:(\d+)/)||[])[1]+' procesos)'
   if(/NO_ESTABA/.test(salida)) return 'HECHO por el CLI: '+objetivo+' ya no estaba abierto'
   return 'NO se pudo cerrar '+objetivo+': '+salida.slice(0,150)
