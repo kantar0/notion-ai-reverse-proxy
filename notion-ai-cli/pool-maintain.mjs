@@ -126,22 +126,37 @@ async function medir(spaceId) {
   if (base.free) return { cupo: false, plan: 'free-agotado' }
   if (!base.composer) return { cupo: false, plan: 'sin-composer' }
   // Un espacio agotado TAMBIEN pinta el composer, asi que verlo no prueba nada:
-  // asi se contaban como buenos espacios secos y cada peticion se perdia
-  // rotando por ellos. La prueba real es escribir (sin enviar) y mirar si el
-  // boton de enviar se habilita. No gasta ninguna respuesta.
-  const vivo = await page.evaluate(async () => {
+  // asi se contaban como buenos espacios secos. La prueba real es escribir (sin
+  // enviar) y ver si el boton de enviar se habilita; no gasta ninguna respuesta.
+  // OJO: tiene que escribirse por CDP. El editor de Notion ignora execCommand,
+  // asi que con el no se escribia NADA y todos los espacios salian agotados.
+  const caja = await page.evaluate(() => {
     const c = [...document.querySelectorAll('[contenteditable="true"][role="textbox"], [contenteditable="true"]')].pop()
-    if (!c) return false
-    c.focus()
-    document.execCommand && document.execCommand('insertText', false, 'x')
-    await new Promise(r => setTimeout(r, 1200))
+    if (!c) return null
+    const r = c.getBoundingClientRect()
+    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+  }).catch(() => null)
+  if (!caja) return { cupo: false, plan: 'sin-composer' }
+  if (!cdpPagina) cdpPagina = await ctx.newCDPSession(page)
+  for (const st of [{ type: 'mouseMoved', button: 'none', buttons: 0, clickCount: 0 },
+                    { type: 'mousePressed', button: 'left', buttons: 1, clickCount: 1 },
+                    { type: 'mouseReleased', button: 'left', buttons: 0, clickCount: 1 }])
+    await cdpPagina.send('Input.dispatchMouseEvent', { x: caja.x, y: caja.y, ...st }).catch(() => {})
+  await cdpPagina.send('Input.insertText', { text: 'x' }).catch(() => {})
+  await sleep(1500)
+  const vivo = await page.evaluate(() => {
+    const c = [...document.querySelectorAll('[contenteditable="true"]')].pop()
+    const escrito = ((c && c.innerText) || '').trim().length > 0
     const b = document.querySelector('[data-testid="agent-send-message-button"],[aria-label="Submit AI message"]')
     const activo = !!b && !(b.disabled || b.getAttribute('aria-disabled') === 'true')
-    // Dejar el composer como estaba: nada de basura en el chat del usuario.
-    c.focus()
-    for (let i = 0; i < 4; i++) document.execCommand && document.execCommand('delete', false)
-    return activo
-  }).catch(() => false)
+    // Sin texto escrito la prueba no vale: se avisa para no dar por agotado algo
+    // que si tiene cupo.
+    return escrito ? activo : null
+  }).catch(() => null)
+  // Dejar el composer limpio: nada de basura en el chat del usuario.
+  for (let i = 0; i < 3; i++)
+    await cdpPagina.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 }).catch(() => {})
+  if (vivo === null) return { cupo: true, plan: 'free-sin-medir' }   // ante la duda, NO tachar
   return { cupo: vivo, plan: vivo ? 'free' : 'free-agotado' }
 }
 
