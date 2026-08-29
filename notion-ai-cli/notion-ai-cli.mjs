@@ -2012,6 +2012,7 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
   const limite=Date.now()+4*60_000
   let estable=0, ultimo='', vistos=new Set(), reenvios=0, atascos=0, huellaPrevia='', ultimoCambio=Date.now()
   let arranco=false, envioEn=Date.now(), lecturasMuertas=0, vueltas=0
+  const esAccion=pidePc(String(promptText||'').replace(/^[\s\S]*SOLICITUD DEL USUARIO:/,''))
   // Cada lectura con tope propio: si el navegador deja de contestar, la petición
   // se quedaba colgada sin poder ni comprobar su propio límite de 10 minutos.
   const conTope=(p,ms,alt)=>Promise.race([p,new Promise(r=>setTimeout(()=>r(alt),ms))])
@@ -2030,6 +2031,10 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
     if(s.failed){ await sleep(2000); continue }
     for(const ev of await conTope(scanVisibleActivity(cdp),15000,[])){
       const k=[ev.tool,ev.action].join('|')
+      // En una conversacion normal, las ordenes que el modelo arrastra del hilo
+      // NO se ejecutan; mostrarlas como actividad hacia creer que un "Hi" estaba
+      // abriendo videos. Se ocultan.
+      if(!esAccion&&/EJECUTAR|run_command|start |taskkill|powershell/i.test(String(ev.action||'')+String(ev.detail||''))) continue
       if(!vistos.has(k)){ vistos.add(k); progress('working',ev.action,ev) }
     }
     // Si Notion contesta con el aviso de cupo, no hay respuesta que esperar:
