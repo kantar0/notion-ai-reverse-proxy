@@ -298,6 +298,47 @@ function getAccountSessionFile(account={}){
 function hasSavedSessionForAccount(account={}){
   try{return fs.existsSync(getAccountSessionFile(account))}catch{return false}
 }
+// Créditos de IA reales de una cuenta: el cupo de Notion AI es 'basic_ai_credits'
+// POR USUARIO por período de facturación (~100/período, no 20 por workspace).
+// Este endpoint da el número exacto y cuándo se resetea, sin gastar nada.
+function perteneceACuenta(spaceId,account){
+  try{ return listConnectedAccounts().some(a=>a.spaceId===spaceId&&a.uid===account.uid) }catch{ return false }
+}
+async function creditosDeCuenta(account={}){
+  try{
+    const ses=JSON.parse(fs.readFileSync(getAccountSessionFile(account),'utf8'))
+    const tok=(ses.cookies||[]).find(c=>c.name==='token_v2')
+    const uid=account.uid||account.userId||''
+    if(!tok) return null
+    const base={'content-type':'application/json','cookie':'token_v2='+tok.value,
+      'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+      'notion-client-version':'23.13.0.100'}
+    if(uid) base['x-notion-active-user-header']=uid
+    // Un workspace BUSINESS devuelve "not_applicable" (IA incluida). Se pide la
+    // lista de spaces una vez y se prueban unos pocos hasta dar con uno Free.
+    let spaces=[]
+    try{
+      const g=await fetch('https://www.notion.so/api/v3/getSpaces',{method:'POST',headers:base,body:'{}',signal:AbortSignal.timeout(8000)})
+      if(g.status===200){ const gj=await g.json(); const u=Object.keys(gj)[0]; spaces=Object.keys(gj[u]?.space||{}) }
+    }catch{}
+    if(!spaces.length&&account.spaceId) spaces=[account.spaceId]
+    let j=null
+    for(const sp of spaces.slice(0,5)){
+      try{
+        const res=await fetch('https://www.notion.so/api/v3/getCreditRateLimitStatus',{method:'POST',headers:base,
+          body:JSON.stringify({spaceId:sp}),signal:AbortSignal.timeout(6000)})
+        if(res.status!==200) continue
+        const cand=await res.json().catch(()=>null)
+        if(cand&&cand.status&&cand.status!=='not_applicable'){ j=cand; break }
+      }catch{}
+    }
+    if(!j) return null
+    const bp=j.billingPeriodWindow||j.window||{}
+    return {status:j.status, usados:Number(bp.used)||0, limite:Number(bp.limit)||0,
+      disponibles:Math.max(0,(Number(bp.limit)||0)-(Number(bp.used)||0)),
+      resetMs:j.resumesAtMs||bp.periodEndMs||0, tier:j.creditTier||'?'}
+  }catch{ return null }
+}
 // Comprueba si el token de una cuenta SIGUE VIVO por API (con headers de
 // navegador, sin ellos Notion responde 403 a cualquier fetch). Es instantáneo y
 // no toca el motor CDP: antes, una sesión caducada solo se descubría tras un
@@ -2581,8 +2622,24 @@ async function rotateToAvailableAccount(progress=()=>{},triedKeys=[],reason=''){
   // asi que los demas espacios de la misma cuenta son candidatos validos y van
   // primero: no hay que cambiar de sesion para usarlos.
   const current=listConnectedAccounts().find(a=>a.key===currentKey)||null
-  const candidates=listRotatableAccounts([currentKey,...triedKeys])
-    .sort((a,b)=>Number(b.uid===current?.uid)-Number(a.uid===current?.uid))
+  let candidates=listRotatableAccounts([currentKey,...triedKeys])
+  // Ir a la cuenta con créditos disponibles primero: como el cupo es per-user,
+  // rotar a OTRO workspace de una cuenta ya agotada no sirve de nada; hay que
+  // saltar a una cuenta distinta que aún tenga créditos.
+  try{
+    const porUid=new Map()
+    for(const cand of candidates){
+      if(porUid.has(cand.uid)) continue
+      const cr=await creditosDeCuenta(cand)
+      porUid.set(cand.uid, cr?cr.disponibles:-1)
+    }
+    candidates=candidates.slice().sort((a,b)=>(porUid.get(b.uid)||0)-(porUid.get(a.uid)||0))
+    // Descarta de entrada las cuentas SIN créditos (per-user): ahorra recorrer
+    // todos sus workspaces para nada.
+    candidates=candidates.filter(c=>(porUid.get(c.uid)||0)!==0)
+  }catch{
+    candidates=candidates.sort((a,b)=>Number(b.uid===current?.uid)-Number(a.uid===current?.uid))
+  }
   for(const candidate of candidates){
     // Anunciar "sin cupo" sin haberlo comprobado era mentir al usuario: el
     // mismo camino se recorre cuando el motor falla. Solo se dice si el propio
@@ -2704,19 +2761,19 @@ async function runHiddenPromptWithRotation(userText,progress=()=>{}){
         lanzarPoolMaintain('sin cupo') }   // repone el colchon sin esperar al ciclo
       const next=await rotateToAvailableAccount(progress,[...tried],error.message)
       if(next){ tried.add(next.key); continue }
-      if(!espacioCreado&&createSpaceWithQuota(progress)){
-        espacioCreado=true      // solo un intento por peticion, para no encadenar creaciones
-        tried.clear()
-        continue
+      // NO se crean workspaces: el cupo de IA es por CUENTA (basic_ai_credits,
+      // 100/período), no por workspace. Crear no da ni un crédito más.
+      // Mensaje con los créditos REALES de cada cuenta y cuándo se resetean.
+      const emails=[...new Set(listConnectedAccounts().map(a=>a.email).filter(Boolean))]
+      const partes=['Se acabó el cupo de IA en todas tus cuentas.']
+      let prontoMs=0
+      for(const email of emails){
+        const cuenta=listConnectedAccounts().find(a=>a.email===email)
+        const cr=await creditosDeCuenta(cuenta)
+        if(cr&&cr.resetMs&&(!prontoMs||cr.resetMs<prontoMs)) prontoMs=cr.resetMs
       }
-      // Sin cupo en ningún sitio: el usuario necesita saber QUÉ hacer, no un
-      // error técnico encadenado.
-      const st=loadState()
-      const cortadas=Object.entries(st.spaceCreateBlockedBy||{}).filter(([,t])=>t>Date.now()).map(([e])=>e)
-      const partes=['Se acabó el cupo de IA en todos los workspaces disponibles.']
-      partes.push('Cada workspace del plan Free trae 20 respuestas y no se reponen: hay que añadir workspaces o cuentas.')
-      if(cortadas.length) partes.push('Ahora mismo Notion no deja crear más en: '+cortadas.join(', ')+' (corta por ritmo; se reintenta solo cada 30 min).')
-      partes.push('Lo que más suma: inicia sesión en otra cuenta de Notion en el navegador y el CLI la detecta sola.')
+      if(prontoMs){ const d=Math.max(0,Math.round((prontoMs-Date.now())/86400000)); partes.push('El cupo es 100 créditos por cuenta y período (~27 días); el próximo reset es en ~'+d+' días.') }
+      partes.push('Crear workspaces NO ayuda (el cupo es por cuenta, no por workspace). Para más ahora: inicia sesión en otra cuenta de Notion en el navegador y el CLI la usa sola.')
       throw new Error(partes.join(' '))
     }
   }
@@ -3944,7 +4001,21 @@ async function handleBridgeRequest(workingPath,req){
       const bloq=Object.entries(st.spaceCreateBlockedBy||{}).filter(([,t])=>t>Date.now()).map(([e])=>e)
       const lineas=[ps?('Ultima medicion: '+ps.conCupo+'/'+ps.minimo+' workspaces con cupo · '+ps.creados+' creado(s) · '+new Date(ps.at).toLocaleString()):'Sin mediciones todavia']
       if(bloq.length) lineas.push('Cuentas cortadas por ritmo de Notion: '+bloq.join(', '))
-      // Cuánto dura: con el consumo real medido, no con suposiciones.
+      // Créditos REALES por cuenta (el cupo de verdad: per-user, no per-workspace).
+      const emailsCred=[...new Set(listConnectedAccounts().map(a=>a.email).filter(Boolean))]
+      lineas.push('Créditos de IA por cuenta (100 por período, ~27 días):')
+      let totalDisp=0, algunaMedida=false
+      for(const email of emailsCred){
+        const cuenta=listConnectedAccounts().find(a=>a.email===email)
+        const cr=await creditosDeCuenta(cuenta)
+        if(cr){
+          algunaMedida=true; totalDisp+=cr.disponibles
+          const dias=cr.resetMs?Math.max(0,Math.round((cr.resetMs-Date.now())/86400000)):null
+          lineas.push('  '+(cr.disponibles>0?'✓':'✗')+' '+email+': '+cr.disponibles.toFixed(0)+' créditos libres ('+cr.usados.toFixed(1)+'/'+cr.limite+')'+(dias!=null?', reset en '+dias+'d':''))
+        }else lineas.push('  · '+email+': no pude leer créditos (sesión?)')
+      }
+      if(algunaMedida) lineas.push('TOTAL disponible ahora: ~'+totalDisp.toFixed(0)+' créditos. OJO: crear workspaces NO da más — el cupo es por CUENTA. Para más: otra cuenta o esperar el reset.')
+      // Consumo local medido (peticiones servidas).
       const c=st.consumo||{}
       const conCupo=(st.conCupoIds||[]).length
       if(c.peticiones){
