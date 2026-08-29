@@ -2518,6 +2518,18 @@ function abrirLocal(objetivo,cwd){
     })
   })
 }
+// PowerShell directo, sin cmd por medio: evita el infierno de comillas anidadas
+// al pasar guiones que ya llevan las suyas.
+function psEval(guion){
+  return new Promise(resolve=>{
+    const ps=spawn('powershell',['-NoProfile','-Command',String(guion)],{windowsHide:true,stdio:['ignore','pipe','pipe']})
+    let out='',err=''
+    ps.stdout.on('data',d=>{out+=String(d)})
+    ps.stderr.on('data',d=>{err+=String(d)})
+    ps.on('error',e=>resolve({ok:false,texto:e.message}))
+    ps.on('close',code=>resolve({ok:code===0,texto:(out||err||'').trim()}))
+  })
+}
 function ejecutarLocal(comando,cwd){
   const apertura=comandoDeApertura(comando)
   if(apertura) return abrirLocal(apertura,cwd)
@@ -2601,6 +2613,57 @@ async function aperturaEnPc(texto){
   log('[pc] abrir '+destino+' -> '+(r.ok?'ok':'fallo'))
   return (r.ok?'HECHO por el CLI: ':'NO se pudo abrir: ')+destino+' — '+String(r.texto||'').slice(0,200)
 }
+// Cerrar programas, tambien sin depender del modelo: pedia
+// taskkill /IM "HaxBall AAA.exe" cuando el proceso real es app.exe (el nombre
+// del acceso directo no es el del ejecutable), fallaba y el cliente seguia
+// abierto.
+const NO_CERRAR = ['explorer','node','electron','msedge','chrome.*headless','powershell','cmd','conhost','dwm','csrss','winlogon','services','svchost','shosso','bridgemind']
+function esProtegido(nombre){
+  const n=String(nombre||'').toLowerCase()
+  return NO_CERRAR.some(x=>new RegExp('^'+x+'$').test(n))
+}
+async function cierreEnPc(texto){
+  const bruto=String(texto||'').trim(), bajo=bruto.toLowerCase()
+  const VERBOS=['cierra','cerrar','cierrame','ciérrame','mata','matar','termina','terminar','finaliza','finalizar']
+  let corte=-1,largo=0
+  for(const v of VERBOS){ const i=bajo.indexOf(v+' '); if(i>=0&&(corte<0||i<corte)){corte=i;largo=v.length} }
+  if(corte<0) return null
+  let objetivo=bruto.slice(corte+largo).trim()
+    .replace(/^(el|la|los|las|un|una)\s+/i,'')
+    .replace(/^(programa|aplicaci[oó]n|app|cliente|ventana)\s+(de\s+)?/i,'')
+    .replace(/\s+(ahora|ya|porfa|por favor)$/i,'')
+    .replace(/[.?!,]+$/,'').trim()
+  if(!objetivo||objetivo.length>60) return null
+  const clave=objetivo.toLowerCase()
+  // nombre del ejecutable: app conocida, o el destino real del acceso directo
+  let proceso=APPS[clave]||null
+  if(!proceso){
+    const k=Object.keys(APPS).filter(x=>clave===x||clave.includes(x)).sort((a,b)=>b.length-a.length)[0]
+    if(k) proceso=APPS[k]
+  }
+  if(!proceso){
+    const r=await ejecutarHerramienta('list_files',{path:'~/Desktop'}).catch(()=>null)
+    let nombres=[]
+    try{ const j=JSON.parse(r&&r.texto||'[]'); if(Array.isArray(j)) nombres=j.map(x=>x.name).filter(Boolean) }catch{}
+    const palabras=clave.split(/\s+/).filter(p=>p.length>2)
+    const mejor=nombres.filter(c=>/\.(lnk|exe)$/i.test(c))
+      .map(c=>({c,pts:palabras.filter(p=>c.toLowerCase().includes(p)).length}))
+      .filter(x=>x.pts>0).sort((a,b)=>b.pts-a.pts||a.c.length-b.c.length)[0]
+    if(mejor){
+      const ruta=path.join(os.homedir(),'Desktop',mejor.c)
+      const q=await psEval('$s=New-Object -ComObject WScript.Shell; [System.IO.Path]::GetFileNameWithoutExtension($s.CreateShortcut('+JSON.stringify(ruta)+').TargetPath)')
+      proceso=String(q.texto||'').trim().split(/\r?\n/).pop()||null
+    }
+  }
+  if(!proceso) return null
+  if(esProtegido(proceso)) return 'NO cierro '+proceso+': es un proceso del sistema o del propio entorno'
+  const r=await psEval('$p=Get-Process '+JSON.stringify(proceso)+' -ErrorAction SilentlyContinue; if($p){$n=$p.Count; $p | Stop-Process -Force; "CERRADO:"+$n}else{"NO_ESTABA"}')
+  const salida=String(r.texto||'')
+  log('[pc] cerrar '+proceso+' -> '+salida.trim().slice(0,40))
+  if(/CERRADO:/.test(salida)) return 'HECHO por el CLI: cerrado '+objetivo+' ('+proceso+', '+(salida.match(/CERRADO:(\d+)/)||[])[1]+' procesos)'
+  if(/NO_ESTABA/.test(salida)) return 'HECHO por el CLI: '+objetivo+' ya no estaba abierto'
+  return 'NO se pudo cerrar '+objetivo+': '+salida.slice(0,150)
+}
 async function processPrompt(userText, progress=()=>{}) {
   const { runMode = DEFAULT_MODE } = loadState()
   appendTranscript('Usuario', userText)
@@ -2609,7 +2672,8 @@ async function processPrompt(userText, progress=()=>{}) {
     let ultimoResultado=null
     const ordenesVistas=new Set()
     // Si la peticion nombra una ruta, se resuelve YA y se le da hecha.
-    const abierto=await aperturaEnPc(userText).catch(e=>{log('[pc] apertura falló: '+String(e&&e.message||e).slice(0,120));return null})
+    const cerrado=await cierreEnPc(userText).catch(e=>{log('[pc] cierre falló: '+String(e&&e.message||e).slice(0,120));return null})
+    const abierto=cerrado||await aperturaEnPc(userText).catch(e=>{log('[pc] apertura falló: '+String(e&&e.message||e).slice(0,120));return null})
     const escrito=abierto||await escrituraEnPc(userText).catch(e=>{log('[pc] escritura falló: '+String(e&&e.message||e).slice(0,120));return null})
     // Una accion ya ejecutada (abrir, escribir) NO necesita que Notion redacte la
     // confirmacion: el trabajo esta hecho y esperar a que conteste solo suma
