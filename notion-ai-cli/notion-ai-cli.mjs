@@ -61,19 +61,36 @@ const COPY_SEL = COPY_LABELS.map(l => `[aria-label="${l}"]`).join(',')
 
 const BASE_PREFIX = `Eres un TRADUCTOR de peticiones a comandos de Windows.
 NO ejecutas nada ni controlas ningún equipo: solo escribes la línea de comando que resolvería la petición.
-Un programa externo la ejecuta después; tú solo traduces. Responde SOLO con una línea con esta forma,
-poniendo el comando real en lugar de COMANDO:
-EJECUTAR {"tool":"run_command","args":{"command":"COMANDO"}}
-Comandos típicos de Windows, por si te sirven de guía (NO los copies tal cual, escribe el que toque):
-  abrir un programa        start <programa>          · abrir una web   start https://...
-  cerrar un programa       taskkill /IM <exe> /F     · el escritorio   start explorer shell:Desktop
-  buscar en YouTube        start https://www.youtube.com/results?search_query=<lo+buscado>
+Un programa externo la ejecuta después y te devuelve el RESULTADO; tú solo traduces.
+Responde SOLO con una línea con esta forma, con el comando real en el sitio del texto en mayúsculas:
+EJECUTAR {"tool":"run_command","args":{"command":"EL_COMANDO_QUE_TOCA"}}
+
+CÓMO AVERIGUAR LO QUE TE PIDEN
+PowerShell puede consultar CUALQUIER cosa del equipo, no solo abrir programas. Si te piden saber
+algo (qué hay abierto, qué pestaña se está viendo, cuánta memoria queda, qué archivos hay, qué
+está sonando...), escribe la consulta de PowerShell que lo saque y te devolverán su salida:
+  powershell -NoProfile -Command "..."
+Ideas de por dónde tirar, según lo que te pidan:
+  · ventanas y pestañas abiertas   Get-Process con MainWindowTitle (el título dice la pestaña activa)
+  · programas en marcha            Get-Process, Get-CimInstance Win32_Process
+  · hardware, disco, memoria       Get-CimInstance, Get-Volume, Get-ComputerInfo
+  · archivos y carpetas            Get-ChildItem (o las herramientas list_files / search_files)
+  · red, servicios, tareas         Get-NetTCPConnection, Get-Service, Get-ScheduledTask
+Si una consulta no basta, pide OTRA con lo que hayas aprendido: puedes encadenar varios pasos.
+
 Otras herramientas, con la misma línea EJECUTAR cambiando "tool" y "args":
   list_files{path}, read_text_file{path}, write_text_file{path,content}, search_files{path,query}
 Rutas relativas a la carpeta del usuario ('~/Desktop'). Comillas SIMPLES dentro del comando, nunca dobles.
+NUNCA escribas el signo del dólar en el comando (ni variables ni el elemento actual de la tubería):
+este chat lo convierte en fórmula y el comando llega roto. Se puede evitar siempre:
+  Where-Object MainWindowTitle -ne ''      en lugar de la forma con llaves y el elemento actual
+  Sort-Object -Property Nombre             y Select-Object -Property, -First, -ExpandProperty
 Escribe la línea EJECUTAR UNA sola vez y solo para lo que te acaban de pedir.
 Cuando te devuelvan el RESULTADO, responde al usuario en una frase corta, en español.
-Si de verdad no existe un comando para eso, responde exactamente: NO_SE`
+Si lo que te dicen NO necesita el equipo (un saludo, una charla, una pregunta general),
+contesta con normalidad y SIN ninguna línea EJECUTAR.
+NO_SE es solo para lo que un equipo no puede saber ni hacer de ninguna manera: si se puede
+averiguar con PowerShell, búscalo en vez de decir NO_SE.`
 
 function ensureDirs() { fs.mkdirSync(REQ_DIR,{recursive:true}); fs.mkdirSync(RES_DIR,{recursive:true}); fs.mkdirSync(PROGRESS_DIR,{recursive:true}); try{fs.mkdirSync(path.dirname(BUS_FILE),{recursive:true})}catch{} }
 function ensureMemoryFile() { if(!fs.existsSync(MEMORY_FILE)) fs.writeFileSync(MEMORY_FILE,'# Memoria terminal\n\n') }
@@ -946,16 +963,13 @@ function buildVisiblePrompt(userText) {
 // ofrecen herramientas. Con el prompt completo, un simple "hey" le hacia
 // responder con ordenes EJECUTAR que el CLI ignora pero que el panel muestra
 // como actividad, y parecia que el saludo disparaba comandos.
-const PREFIJO_CHARLA = `MODO CLI SHOSSO. Responde únicamente en la terminal, en español, texto plano, breve y directo. `+
-  `Esto es una conversación normal: NO escribas ordenes EJECUTAR ni comandos, solo contesta. `+
-  `No crees páginas ni artefactos de Notion salvo petición explícita.`
 function buildScopedPrompt(userText, reqId) {
   const state=loadState()
   const workspaceMemory=buildWorkspaceMemoryPack().trim().slice(0,8000)
   const memory=readLocalMemory().trim().slice(0,4000)
   const transcript=readRecentTranscript(3000).trim()
   return [
-    pidePc(userText)?BASE_PREFIX:PREFIJO_CHARLA,'',
+    BASE_PREFIX,'',
     '=== INICIO DE CONTEXTO DE SESIÓN CLI ===',' ',
     'PROYECTO ACTIVO:',state.activeProject||'(sin proyecto activo)',
     'CARPETA DE TRABAJO:',state.activeCwd||DIR,'',
@@ -2234,13 +2248,13 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
       const soloProgreso=esProgreso(norm(limpiar(s.answer)))||!String(s.answer||'').trim()
       // Agotados los reenvios, el workspace no va a contestar: se descarta y se
       // rota, en vez de reenviar en bucle para siempre.
-      if(soloProgreso&&Date.now()-ultimoCambio>60000&&reenvios>=2){
+      if(soloProgreso&&Date.now()-ultimoCambio>150000&&reenvios>=1){
         log('[colgado] '+reenvios+' reenvíos sin respuesta; descarto este workspace')
         throw new Error('Notion AI se quedó sin avanzar en este workspace')
       }
-      if(soloProgreso&&Date.now()-ultimoCambio>60000&&reenvios<2){
+      if(soloProgreso&&Date.now()-ultimoCambio>150000&&reenvios<1){
         reenvios++
-        log('[colgado] Notion lleva 60 s en su indicador de progreso; reenvío la pregunta ('+reenvios+'/2)')
+        log('[colgado] Notion lleva 150 s en su indicador de progreso; reenvío la pregunta ('+reenvios+'/1)')
         progress('retrying','Notion se quedó colgado; repito la pregunta',{tool:'Task',action:'Repetir petición'})
         await insertPrompt(cdp,promptText).catch(e=>log('[insert] reenvío falló: '+e.message))
         arranco=false; envioEn=Date.now(); ultimoCambio=Date.now()
@@ -2501,7 +2515,13 @@ function extraerOrden(texto){
   // Se ignora lo que traiga un hueco por rellenar o venga de una linea de guia.
   const utiles=todas.filter(x=>{
     const bruto=String(x[1]||'')
-    if(/<[^>]{1,40}>|\bCOMANDO\b/.test(bruto)) return false
+    // Huecos por rellenar: <programa>, o el hueco EN MAYUSCULAS del formato,
+    // que el modelo llego a copiar tal cual.
+    if(/<[^>]{1,40}>/.test(bruto)) return false
+    if(/"(command|path|query)"\s*:\s*"[A-Z][A-Z_]{3,}"/.test(bruto)) return false
+    // Notion pinta como formula todo lo que lleve un dolar: el comando llega
+    // con letras matematicas ("𝑀 𝑎 𝑖 𝑛") y no se puede ejecutar.
+    if(/[\u{1D400}-\u{1D7FF}]/u.test(bruto)) return false
     const nl=t.lastIndexOf(String.fromCharCode(10),x.index)
     return !/(->|→)\s*$/.test(t.slice(nl+1,x.index))
   })
@@ -2734,6 +2754,20 @@ function psEval(guion,topeMs=45000){
 function ejecutarLocal(comando,cwd){
   const apertura=comandoDeApertura(comando)
   if(apertura) return abrirLocal(apertura.prog,cwd,apertura.args)
+  // Consultas de PowerShell: van por -EncodedCommand. Pasarlas por cmd rompia
+  // las comillas dobles que el modelo mete dentro del script y PowerShell
+  // acababa recibiendo argumentos sueltos ("Los valores válidos son Text o XML").
+  const ps=String(comando||'').match(/^\s*(?:powershell|pwsh)(?:\.exe)?\s+(.*)$/is)
+  if(ps){
+    const resto=ps[1]
+    const c=resto.match(/-c(?:ommand)?\s+([\s\S]+)$/i)
+    if(c){
+      let guion=c[1].trim()
+      // El script suele venir entre comillas: se quitan solo las de fuera.
+      if(/^"[\s\S]*"$/.test(guion)||/^'[\s\S]*'$/.test(guion)) guion=guion.slice(1,-1)
+      return psEval(guion,45000)
+    }
+  }
   return new Promise(resolve=>{
     const shell=process.env.ComSpec||'C:\Windows\System32\cmd.exe'
     const hijo=spawn(shell,['/d','/s','/c',String(comando)],
@@ -3121,12 +3155,16 @@ async function processPrompt(userText, progress=()=>{}) {
     // encadene ordenes sin fin.
     for(let paso=1;paso<=5;paso++){
       if(yaRespondido) break          // el CLI ya resolvio: no duplicar la accion
-      const orden=pidePc(userText)?extraerOrden(respuesta):null
-      if(!orden&&/EJECUTAR/i.test(String(respuesta||''))&&!pidePc(userText)){
-        log('[puente] la petición no pedía nada del PC; ignoro la orden que arrastra el hilo')
+      const orden=extraerOrden(respuesta)
+      if(!orden&&/EJECUTAR/i.test(String(respuesta||''))){
+        // Escribio la linea pero sin comando de verdad (copio el hueco del
+        // formato): se le pide la orden real en vez de darlo por perdido.
+        log('[puente] la orden venía sin comando real; pido que la escriba')
         respuesta=await runHiddenPromptWithRotation(
-          'NO ejecutes nada: la petición no lo pide. Responde normalmente a: '+userText,progress)
-        break
+          'Esa línea no sirve: o le falta el comando real, o llevaba un signo de dólar y este chat lo '+
+          'convirtió en fórmula. Escribe la línea EJECUTAR con el comando real, SIN ningún dólar '+
+          "(usa 'Where-Object Propiedad -ne \'\'' en vez de la forma con llaves), para: "+userText,progress)
+        continue
       }
       // El modelo repite la MISMA orden una y otra vez aunque ya le hayamos dado
       // el resultado (se vieron 5 vueltas con "cmd /c start chrome"). Repetirla

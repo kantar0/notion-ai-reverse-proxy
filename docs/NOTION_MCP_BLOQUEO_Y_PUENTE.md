@@ -151,6 +151,26 @@ agotado dice *"wait until <fecha> for it to reset"* y parece que la cuenta enter
 seca. Es falso: en esa misma cuenta, **un workspace nuevo del plan Free nace con cupo**.
 Mide siempre espacio por espacio.
 
+**El signo del dólar se convierte en fórmula.** El chat interpreta `$…$` como matemáticas, así
+que un `$_.MainWindowTitle` vuelve como `𝑀 𝑎 𝑖 𝑛 𝑊 𝑖 𝑛 𝑑 𝑜 𝑤 …` y el comando llega
+inservible. Normalizar con NFKC **no** lo recupera: se han perdido los `$` y los `_`. Prohíbe el
+dólar en el prompt y enseña la forma equivalente sin él (`Where-Object MainWindowTitle -ne ''`),
+y descarta como corrupta cualquier orden con caracteres del bloque matemático (U+1D400–U+1D7FF).
+
+**PowerShell con comillas dobles no sobrevive a `cmd /c`.** El comando llega partido y
+PowerShell responde cosas como *"Los valores válidos son Text o XML"*. Detecta
+`powershell … -Command …`, extrae el script y pásalo por `-EncodedCommand` (UTF-16LE en base64):
+así da igual qué comillas use el modelo.
+
+**No decidas por lista de palabras si la petición toca el PC.** Con una lista, *"revisa qué
+pestañas tengo abiertas"* no entraba y el CLI ni lo intentaba. Deja que el modelo lo decida: dale
+un solo prompt que también le permita contestar sin comando cuando no haga falta el equipo.
+
+**Enséñale a AVERIGUAR, no una lista de comandos.** Si solo ve ejemplos de "abrir cosas",
+responde `NO_SE` a todo lo demás. Diciéndole que PowerShell puede consultar cualquier cosa del
+sistema (ventanas, procesos, disco, red, servicios) y que puede encadenar consultas, resuelve
+peticiones que nunca estuvieron en ninguna lista.
+
 **Los ejemplos del prompt se ejecutan.** El prompt viaja escrito dentro del propio hilo, así
 que si tus ejemplos llevan la palabra clave (`EJECUTAR {...}`), el CLI los lee del chat y los
 ejecuta como si fueran la petición: llegó a abrir el bloc de notas, el explorador, Chrome y un
