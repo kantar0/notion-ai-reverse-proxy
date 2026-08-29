@@ -308,6 +308,45 @@ function hasSavedSessionForAccount(account={}){
 function perteneceACuenta(spaceId,account){
   try{ return listConnectedAccounts().some(a=>a.spaceId===spaceId&&a.uid===account.uid) }catch{ return false }
 }
+// ── Multi-cuenta en una sola sesión ────────────────────────────────
+// Notion permite varias cuentas logueadas a la vez. El userId activo vive en
+// localStorage (current-user-id) y el token engloba a todas; cambiar ese uid
+// selecciona la cuenta SIN tocar cookies. Si el user hace multi-login, esto usa
+// los créditos de TODAS las cuentas de la sesión, no solo la principal.
+async function uidsDeSesion(client){
+  try{
+    const raw=await client.evaluate("(()=>{try{const c=(document.cookie.match(/notion_users=([^;]+)/)||[])[1];return c?decodeURIComponent(c):'[]'}catch{return '[]'}})()")
+    const arr=JSON.parse(String(raw||'[]'))
+    return [...new Set(arr.map(x=>typeof x==='string'?x:(x&&x.userId)).filter(Boolean))]
+  }catch{ return [] }
+}
+// Créditos de un uid usando el header, DENTRO de la sesión abierta. Devuelve
+// null si el header no rota de verdad (token single-account: responde el uid del
+// token, no el pedido).
+async function creditosDeUidEnSesion(client,uid,spaceId){
+  try{
+    const expr="(async()=>{try{"+
+      "const r=await fetch('/api/v3/getCreditRateLimitStatus',{method:'POST',headers:{'content-type':'application/json','x-notion-active-user-header':"+JSON.stringify(uid)+"},body:JSON.stringify({spaceId:"+JSON.stringify(spaceId)+"})});"+
+      "if(r.status!==200)return JSON.stringify({e:r.status});"+
+      "const j=await r.json();const bp=j.billingPeriodWindow||{};"+
+      "return JSON.stringify({status:j.status,used:bp.used,limit:bp.limit});"+
+      "}catch(e){return JSON.stringify({e:String(e).slice(0,40)})}})()"
+    const raw=await client.evaluate(expr)
+    const j=JSON.parse(String(raw||'{}'))
+    if(j.e||!(j.limit>0)) return null
+    return {disponibles:Math.max(0,(j.limit||0)-(j.used||0)), status:j.status}
+  }catch{ return null }
+}
+// Fija el uid activo en localStorage (selecciona esa cuenta en la sesión).
+async function fijarUidActivo(client,uid,spaceId){
+  try{
+    await client.evaluate("(()=>{try{"+
+      "localStorage.setItem('LRU:KeyValueStore2:current-user-id',JSON.stringify({value:"+JSON.stringify(uid)+"}));"+
+      (spaceId?"localStorage.setItem('LRU:KeyValueStore2:current-space-id',JSON.stringify({value:"+JSON.stringify(spaceId)+"}));":"")+
+      "}catch{}})()")
+    return true
+  }catch{ return false }
+}
 async function creditosDeCuenta(account={}){
   try{
     const ses=JSON.parse(fs.readFileSync(getAccountSessionFile(account),'utf8'))
@@ -2215,7 +2254,32 @@ async function estrenarChat(cdp){
   await sleep(2500)
   return true
 }
+// Si la sesión tiene varias cuentas, deja activa la que tenga más créditos.
+async function usarMejorUidDeSesion(cdp,progress=()=>{}){
+  const uids=await uidsDeSesion(cdp)
+  if(uids.length<2) return   // sesión de una sola cuenta: nada que rotar
+  // spaceId de cada uid, del mapa de cuentas conocidas
+  const spaceDeUid=uid=>{ const a=listConnectedAccounts().find(x=>x.uid===uid); return a?a.spaceId:null }
+  let mejor=null
+  for(const uid of uids){
+    const sp=spaceDeUid(uid); if(!sp) continue
+    const cr=await creditosDeUidEnSesion(cdp,uid,sp)
+    if(cr&&cr.disponibles>0&&(!mejor||cr.disponibles>mejor.disp)) mejor={uid,sp,disp:cr.disponibles}
+  }
+  if(mejor){
+    const actual=await cdp.evaluate("(()=>{try{return JSON.parse(localStorage.getItem('LRU:KeyValueStore2:current-user-id')).value}catch{return null}})()").catch(()=>null)
+    if(String(actual)!==String(mejor.uid)){
+      await fijarUidActivo(cdp,mejor.uid,mejor.sp)
+      log('[multi] cuenta de la sesión con crédito: '+mejor.uid.slice(0,8)+' ('+mejor.disp+' libres)')
+      progress('working','Uso otra cuenta de la sesión con crédito',{tool:'Task',action:'Multi-cuenta'})
+    }
+  }
+}
 async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real'){
+  // Multi-cuenta: si la sesión tiene varias cuentas logueadas y la activa no
+  // tiene créditos, se salta al uid que sí tenga, sin cambiar de sesión. Solo
+  // hace algo real si hay multi-login (varios uids con el header funcionando).
+  try{ await usarMejorUidDeSesion(cdp,progress) }catch(e){ log('[multi] '+String(e&&e.message||e).slice(0,70)) }
   progress('waiting','Esperando que el thread quede libre',{tool:'Task',action:'Thread libre'})
   // Esperar 10 minutos a que el hilo se libere dejaba al usuario colgado sin
   // remedio: si en minuto y medio sigue ocupado, se estrena uno nuevo, que
@@ -3958,6 +4022,46 @@ async function handleBridgeRequest(workingPath,req){
     else if(req.action==='thread-select'){const p=await selectThread(req.value);result={ok:true,id:req.id,text:`Thread seleccionado: ${p.title} | ${p.threadId||p.url}`,meta:p};log(`THREAD_SELECT ${req.id}`)}
     else if(req.action==='account'){const a=await getActiveAccount();result={ok:!a.error,id:req.id,text:'Cuenta: '+(a.email||a.userId||'sin detectar')+'\nNombre: '+(a.name||'Sin nombre visible')+'\nWorkspace: '+(a.workspace||'Workspace actual')+'\nChat: '+simplifyChatTitle(a.title||''),meta:a};log(`ACCOUNT ${req.id}`)}
     else if(req.action==='connect-account'){const a=await connectCurrentAccount();result={ok:true,id:req.id,text:'Conectado: '+formatAccountLabel(a)+'\nCorreo: '+(a.email||'No detectado todavía')+'\nWorkspace: '+(a.workspace||'Workspace actual')+'\nSesión guardada: '+(fs.existsSync(getAccountSessionFile(a))?'sí':'no'),meta:a};log(`CONNECT_ACCOUNT ${req.id}`)}
+    else if(req.action==='session-accounts'){
+      // Cuentas dentro de la sesión activa, por API directa (no toca el motor).
+      // Es la prueba de si el multi-login funciona: si el token de la cuenta
+      // activa + header de OTRO uid devuelve los datos de ESE uid, entonces el
+      // header rota y se pueden usar los créditos de todas sin cambiar cookies.
+      const lineas=['Cuentas dentro de la sesión activa (multi-login):']
+      try{
+        const act=listConnectedAccounts().find(a=>a.key===getSelectedAccountKey())||listConnectedAccounts()[0]
+        const ses=JSON.parse(fs.readFileSync(getAccountSessionFile(act),'utf8'))
+        const tok=(ses.cookies||[]).find(c=>c.name==='token_v2')
+        const nu=(ses.cookies||[]).find(c=>c.name==='notion_users')
+        let uids=[]
+        try{ uids=[...new Set(JSON.parse(decodeURIComponent(nu.value)).map(x=>typeof x==='string'?x:(x&&x.userId)).filter(Boolean))] }catch{}
+        if(uids.length<2){
+          lineas.push('  Solo 1 cuenta en esta sesión ('+(act?act.email:'?')+').')
+          lineas.push('  Para sumar créditos SIN límite por cuenta: en Notion (mismo navegador), pulsa tu nombre → "Add another account" e inicia otra cuenta. Así una sola sesión tendrá varias, y el CLI usará los créditos de TODAS.')
+        }else{
+          const H=uid=>({'content-type':'application/json','cookie':'token_v2='+tok.value,'user-agent':'Mozilla/5.0 Chrome/126','x-notion-active-user-header':uid})
+          let total=0, rota=false
+          for(const uid of uids){
+            try{
+              const g=await fetch('https://www.notion.so/api/v3/getSpaces',{method:'POST',headers:H(uid),body:'{}',signal:AbortSignal.timeout(10000)})
+              const gj=g.status===200?await g.json():null
+              const respUid=gj?Object.keys(gj)[0]:null
+              const cuadra=respUid===uid
+              if(cuadra&&respUid!==(act.uid)) rota=true
+              const sp=(listConnectedAccounts().find(a=>a.uid===uid)||{}).spaceId
+              let cr=null
+              if(sp){ const c=await fetch('https://www.notion.so/api/v3/getCreditRateLimitStatus',{method:'POST',headers:H(uid),body:JSON.stringify({spaceId:sp}),signal:AbortSignal.timeout(10000)}); if(c.status===200){const cj=await c.json();const bp=cj.billingPeriodWindow||{};if(bp.limit){cr=Math.max(0,bp.limit-bp.used)}} }
+              lineas.push('  '+(cuadra?'✓':'✗')+' '+uid.slice(0,8)+(cr!=null?(' · '+cr+' créditos'):'')+(cuadra?'':' (header NO rota: el token no engloba esta cuenta)'))
+              if(cr!=null&&cuadra) total+=cr
+            }catch(e){ lineas.push('  · '+uid.slice(0,8)+': '+String(e&&e.message||e).slice(0,40)) }
+          }
+          if(rota) lineas.push('MULTI-LOGIN ACTIVO: ~'+total+' créditos usables desde esta sesión sin cambiar cookies. El CLI los usa solos.')
+          else lineas.push('El header NO rota: estas cuentas no están en un mismo login. Haz "Add another account" en Notion para unirlas.')
+        }
+      }catch(e){ lineas.push('  error: '+String(e&&e.message||e).slice(0,80)) }
+      result={ok:true,id:req.id,text:lineas.join(String.fromCharCode(10))}
+      log('SESSION_ACCOUNTS '+req.id)
+    }
     else if(req.action==='health'){
       // Salud de cada cuenta por API, sin tocar el motor ni gastar cupo.
       const emails=[...new Set(listConnectedAccounts().map(a=>a.email).filter(Boolean))]

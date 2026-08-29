@@ -34,7 +34,7 @@ const MODEL_OPTIONS = [
   'sonnet 5', 'grok 4.6', 'glm 5.2'
 ]
 const COMMANDS = [
-  '/ayuda','/cuenta','/quien','/conectar','/lista','/usar','/sig','/estado','/uso','/salud','/crear-lote','/estados','/plan','/rotacion','/descubrir','/discover','/nueva-cuenta','/nuevo-workspace','/pool','/popup','/proxy','/salir',
+  '/ayuda','/cuenta','/quien','/conectar','/lista','/usar','/sig','/estado','/uso','/salud','/crear-lote','/multi','/estados','/plan','/rotacion','/descubrir','/discover','/nueva-cuenta','/nuevo-workspace','/pool','/popup','/proxy','/salir',
   '/pin','/pin-current','/thread','/threads','/welcome','/st','/status','/account','/cuenta','/accounts','/cuentas','/connect-account','/conectar-cuenta','/use-account','/usar-cuenta','/next-account','/siguiente-cuenta','/ai-status','/cuota','/ai-status-all','/cuotas','/rotation-plan','/plan-rotacion','/auto-rotate','/rotacion-auto',
   '/cls','/clear-selection','/ms','/memory-show','/mr','/memory-reset','/msave','/memory-save',
   '/sp','/set-project','/cp','/clear-project','/model','/modelo','/set-model','/models','/modelos','/mode','/get-mode',
@@ -180,6 +180,7 @@ function parseCommand(line) {
   if (line === '/account' || line === '/cuenta') return { action: 'account' }
   if (line === '/accounts' || line === '/cuentas') return { action: 'accounts' }
   if (line === '/salud' || line === '/health') return { action: 'health' }
+  if (line === '/cuentas-sesion' || line === '/multi') return { action: 'session-accounts' }
   if (line === '/connect-account' || line === '/conectar-cuenta') return { action: 'connect-account' }
   if (line.startsWith('/use-account ')) return { action: 'select-account', value: line.slice(13).trim() }
   if (line.startsWith('/usar-cuenta ')) return { action: 'select-account', value: line.slice(13).trim() }
@@ -243,6 +244,7 @@ async function main() {
   }
   printQuickStart()
   publishTerminalState('ready')
+  let modeloActivo = (startupStatus && startupStatus.meta && startupStatus.meta.activeModel) || 'GPT-5.6'
   let rl = readline.createInterface({ input: process.stdin, output: process.stdout, completer: cliCompleter })
   while (true) {
     let line = ''
