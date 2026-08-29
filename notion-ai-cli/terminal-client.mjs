@@ -247,7 +247,8 @@ async function main() {
   while (true) {
     let line = ''
     try {
-      line = (await rl.question('\n\x1b[37mTú › \x1b[0m')).trim()
+      line = (await rl.question(`
+[90m[${modeloActivo}][0m [37mTú › [0m`)).trim()
     } catch (error) {
       const msg = String(error?.message || error || '')
       if (/readline was closed|aborted/i.test(msg)) {
@@ -348,6 +349,10 @@ async function main() {
       if (workingTimer) clearInterval(workingTimer)
       clearStatus()
       if (payload.action==='prompt') publishTerminalState('ready')
+    }
+    if(result.ok&&(payload.action==="set-model"||payload.action==="model-current")){
+      const m=String(result.text||"").match(new RegExp("Modelo activo:\s*(.+)","i"))
+      if(m) modeloActivo=m[1].trim()
     }
     if (result.ok) {
       console.log(`\n\x1b[36m━━━ Notion AI ━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m\n${String(result.text || '')}\n\x1b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m`)
