@@ -2096,6 +2096,16 @@ async function chatSnapshot(cdp,reqId){
     return {failed:true}
   }
 }
+// Vuelve al hilo que ya tenía esa terminal, para no perderle el contexto.
+async function volverAlHilo(cdp,threadId){
+  if(!threadId) return false
+  try{
+    await cdp.call('Page.navigate',{url:'https://app.notion.com/chat?t='+threadId},20000)
+    await sleep(4000)
+    const url=String(await cdp.evaluate('location.href',8000).catch(()=>''))
+    return url.includes(threadId)
+  }catch{ return false }
+}
 // Estrena un hilo: sin esto cada petición hereda lo que hubiera en el chat.
 async function estrenarChat(cdp){
   const pulsar=`(()=>{for(const etiqueta of ['Start new chat','New chat','Nuevo chat']){
@@ -2113,7 +2123,14 @@ async function estrenarChat(cdp){
 }
 async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real'){
   progress('waiting','Esperando que el thread quede libre',{tool:'Task',action:'Thread libre'})
-  await waitUntil(async()=>{const s=await chatSnapshot(cdp);return s.busy===false},10*60_000,700,'thread libre')
+  // Esperar 10 minutos a que el hilo se libere dejaba al usuario colgado sin
+  // remedio: si en minuto y medio sigue ocupado, se estrena uno nuevo, que
+  // siempre está libre.
+  const libre=await waitUntil(async()=>{const s=await chatSnapshot(cdp);return s.busy===false},90_000,700,'thread libre').catch(()=>false)
+  if(!libre){
+    log('[chat] el hilo sigue ocupado; estreno uno nuevo en vez de seguir esperando')
+    await estrenarChat(cdp).catch(()=>false)
+  }
   const antes=await chatSnapshot(cdp)
   // Chat NUEVO por petición: el hilo acumula, y con él las respuestas y órdenes
   // de lo anterior. De ahí venía que a "revisa qué tengo abierto en Edge"
@@ -2125,8 +2142,18 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
   const duenoAhora=peticionEnCurso&&peticionEnCurso.clientPid
   if(duenoAhora&&duenoAhora!==clienteDelHilo){
     try{
-      const estrenado=await estrenarChat(cdp)
-      log(estrenado?'[chat] terminal nueva: estreno hilo limpio':'[chat] terminal nueva pero no pude estrenar')
+      // Cada terminal tiene SU hilo. Con dos abiertas alternando, estrenar cada
+      // vez que cambia el turno les borraría el contexto a las dos: si la
+      // terminal ya tenía hilo se vuelve a él, y solo se estrena la primera vez.
+      const suyo=hilosPorCliente.get(duenoAhora)
+      if(suyo&&await volverAlHilo(cdp,suyo)){
+        log('[chat] vuelvo al hilo de esa terminal ('+String(suyo).slice(0,8)+')')
+      }else{
+        const estrenado=await estrenarChat(cdp)
+        log(estrenado?'[chat] terminal nueva: estreno hilo limpio':'[chat] terminal nueva pero no pude estrenar')
+        const nuevo=extractThreadIdFromUrl(String(await cdp.evaluate('location.href',8000).catch(()=>'')))
+        if(nuevo) hilosPorCliente.set(duenoAhora,nuevo)
+      }
     }catch(e){ log('[chat] estreno falló: '+String(e&&e.message||e).slice(0,80)) }
     clienteDelHilo=duenoAhora
   }
@@ -2597,7 +2624,9 @@ async function runHiddenPromptWithRotation(userText,progress=()=>{}){
         progress('retrying','Notion se recargó; retomo tu petición',{tool:'Task',action:'Retomar petición'})
         continue
       }
-      if(esErrorDeMotor(error.message)&&reintentosMotor<1){
+      // Dos intentos: el motor a veces tarda en aceptar conexiones justo después
+      // de arrancar, y con uno solo la petición se perdía por unos segundos.
+      if(esErrorDeMotor(error.message)&&reintentosMotor<2){
         reintentosMotor++
         progress('retrying','El motor no respondía; lo reinicio y sigo con tu petición',{tool:'Task',action:'Reiniciar motor',detail:error.message.slice(0,120)})
         const salud=await esperarMotorSano()
@@ -3739,6 +3768,8 @@ function enqueue(task){const p=serial.then(task,task);serial=p.catch(()=>{});ret
 let peticionEnCurso=null
 // Qué terminal es dueña del hilo abierto: al cambiar, se estrena uno limpio.
 let clienteDelHilo=null
+// Hilo de cada terminal: sin esto, dos CLIs abiertos se pisan el contexto.
+const hilosPorCliente=new Map()
 function clienteVivo(req){
   const pid=Number(req&&req.clientPid)
   if(!pid) return true                       // peticiones sin PID: no se tocan
@@ -3884,8 +3915,25 @@ async function handleBridgeRequest(workingPath,req){
       }catch{}}
     fs.writeFileSync(responsePath,JSON.stringify(result,null,2))
   }catch(error){
-    progress('error','La solicitud terminÃƒÆ’Ã‚Â³ con error',{tool:'Task',action:'Error',detail:error.message});fs.writeFileSync(responsePath,JSON.stringify({ok:false,id:req.id,error:error.message},null,2));publishBusReply(req.agentLabel,'⚠ Notion AI: '+error.message);log(`ERR ${req.id} ${error.message}`)
+    // Al usuario no le sirve "Timeout Runtime.enable": se traduce lo que puede
+    // hacer al respecto y el detalle tecnico queda en el log.
+    const crudo=String(error&&error.message||error)
+    const claro=esErrorDeMotor(crudo)
+      ? 'El navegador interno no respondía. Ya lo reinicié: vuelve a enviar la petición.'
+      : (/CLIENTE ABANDONADO/.test(crudo) ? 'Petición cancelada: cerraste la terminal.' : crudo)
+    log('ERR-detalle '+crudo.slice(0,160))
+    progress('error','La solicitud terminó con error',{tool:'Task',action:'Error',detail:claro})
+    fs.writeFileSync(responsePath,JSON.stringify({ok:false,id:req.id,error:claro},null,2));publishBusReply(req.agentLabel,'⚠ Notion AI: '+claro);log(`ERR ${req.id} ${claro}`)
   }finally{
+    // Se queda apuntando al último req: si ese cliente muere después, la
+    // siguiente petición podía verse cancelada por un dueño que ya no es el suyo.
+    if(peticionEnCurso===req) peticionEnCurso=null
+    // Windows recicla los PID: un hilo guardado para un cliente muerto acabaría
+    // heredándolo otra terminal con el mismo número.
+    if(!clienteVivo(req)&&req&&req.clientPid){
+      hilosPorCliente.delete(req.clientPid)
+      if(clienteDelHilo===req.clientPid) clienteDelHilo=null
+    }
     try{fs.unlinkSync(workingPath)}catch{}
     // Cada rotacion/precalentado deja una pestaña abierta: sin esto se acumulaban
     // (21 pestañas = 4,4 GB de RAM solo del motor).
