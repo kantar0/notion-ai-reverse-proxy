@@ -1998,7 +1998,11 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
   // 2) Esperar la respuesta: nueva burbuja + texto estable (misma lectura tres
   //    veces) o el marcador "Notion AI finished". Nada de contadores previos.
   progress('working','Notion AI está trabajando en el worker real',{tool:'Task',action:'Worker real activo'})
-  const limite=Date.now()+10*60_000
+  // Tope por peticion. Eran 10 min: como la cola es serializada (un solo
+  // navegador), una peticion atascada dejaba al usuario sin servicio todo ese
+  // rato. Con 4 min ya han cabido los reenvios y la rotacion; si no contesto,
+  // no va a contestar.
+  const limite=Date.now()+4*60_000
   let estable=0, ultimo='', vistos=new Set(), reenvios=0, atascos=0, huellaPrevia='', ultimoCambio=Date.now()
   let arranco=false, envioEn=Date.now(), lecturasMuertas=0, vueltas=0
   // Cada lectura con tope propio: si el navegador deja de contestar, la petición
@@ -2151,13 +2155,13 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
       const soloProgreso=esProgreso(norm(limpiar(s.answer)))||!String(s.answer||'').trim()
       // Agotados los reenvios, el workspace no va a contestar: se descarta y se
       // rota, en vez de reenviar en bucle para siempre.
-      if(soloProgreso&&Date.now()-ultimoCambio>90000&&reenvios>=3){
+      if(soloProgreso&&Date.now()-ultimoCambio>60000&&reenvios>=2){
         log('[colgado] '+reenvios+' reenvíos sin respuesta; descarto este workspace')
         throw new Error('Notion AI se quedó sin avanzar en este workspace')
       }
-      if(soloProgreso&&Date.now()-ultimoCambio>90000&&reenvios<3){
+      if(soloProgreso&&Date.now()-ultimoCambio>60000&&reenvios<2){
         reenvios++
-        log('[colgado] Notion lleva 90 s en su indicador de progreso; reenvío la pregunta ('+reenvios+'/3)')
+        log('[colgado] Notion lleva 60 s en su indicador de progreso; reenvío la pregunta ('+reenvios+'/2)')
         progress('retrying','Notion se quedó colgado; repito la pregunta',{tool:'Task',action:'Repetir petición'})
         await insertPrompt(cdp,promptText).catch(e=>log('[insert] reenvío falló: '+e.message))
         arranco=false; envioEn=Date.now(); ultimoCambio=Date.now()
