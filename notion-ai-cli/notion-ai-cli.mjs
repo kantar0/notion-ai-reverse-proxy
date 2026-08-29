@@ -2506,11 +2506,16 @@ function abrirLocal(objetivo,cwd){
       '  $p=Get-Process -Name $sonda -ErrorAction SilentlyContinue };'+
       'if($p){"ABIERTO:"+$p.Count}else{"LANZADO_SIN_VENTANA"}'
     const ps=spawn('powershell',['-NoProfile','-Command',guion],{windowsHide:true,stdio:['ignore','pipe','pipe']})
-    let out='',err=''
+    let out='',err='',cerrado=false
+    // Tope: la comprobacion espera hasta 20 s por dentro; si PowerShell se
+    // cuelga, sin esto la peticion no terminaba nunca.
+    const tope=setTimeout(()=>{ if(cerrado) return; cerrado=true; try{ps.kill()}catch{}
+      resolve({ok:true,texto:'lancé '+objetivo+' (no pude confirmar la ventana a tiempo)'}) },35000)
     ps.stdout.on('data',d=>{out+=String(d)})
     ps.stderr.on('data',d=>{err+=String(d)})
-    ps.on('error',e=>resolve({ok:false,texto:'no pude abrir '+objetivo+': '+e.message}))
+    ps.on('error',e=>{ if(cerrado) return; cerrado=true; clearTimeout(tope); resolve({ok:false,texto:'no pude abrir '+objetivo+': '+e.message}) })
     ps.on('close',()=>{
+      if(cerrado) return; cerrado=true; clearTimeout(tope)
       const t=out.trim()
       if(/^ABIERTO:/.test(t)) return resolve({ok:true,texto:'abierto: '+objetivo+' ('+t.split(':')[1]+' procesos)'})
       if(err.trim()) return resolve({ok:false,texto:'no se pudo abrir '+objetivo+': '+err.trim().slice(0,200)})
@@ -2523,8 +2528,13 @@ function abrirLocal(objetivo,cwd){
 }
 // PowerShell directo, sin cmd por medio: evita el infierno de comillas anidadas
 // al pasar guiones que ya llevan las suyas.
-function psEval(guion){
+function psEval(guion,topeMs=45000){
   return new Promise(resolve=>{
+    // Tope duro: sin esto un PowerShell colgado dejaba la peticion esperando
+    // para siempre, y el panel en "trabajando" sin fin.
+    let cerrado=false
+    const tope=setTimeout(()=>{ if(cerrado) return; cerrado=true; try{ps.kill()}catch{}
+      resolve({ok:false,texto:'la orden tardó demasiado y se canceló'}) },topeMs)
     // -EncodedCommand (UTF-16LE en base64): pasar el guion con -Command hacia que
     // Windows re-serializara los argumentos y rompiera las comillas internas, asi
     // que guiones que funcionaban a mano devolvian vacio.
@@ -2533,8 +2543,8 @@ function psEval(guion){
     let out='',err=''
     ps.stdout.on('data',d=>{out+=String(d)})
     ps.stderr.on('data',d=>{err+=String(d)})
-    ps.on('error',e=>resolve({ok:false,texto:e.message}))
-    ps.on('close',code=>resolve({ok:code===0,texto:(out||err||'').trim()}))
+    ps.on('error',e=>{ if(cerrado) return; cerrado=true; clearTimeout(tope); resolve({ok:false,texto:e.message}) })
+    ps.on('close',code=>{ if(cerrado) return; cerrado=true; clearTimeout(tope); resolve({ok:code===0,texto:(out||err||'').trim()}) })
   })
 }
 function ejecutarLocal(comando,cwd){
@@ -3225,7 +3235,8 @@ async function handleBridgeRequest(workingPath,req){
     else{
       // Acuse inmediato: quien pregunta desde Discord veía silencio hasta que
       // hubiera actividad, sin saber siquiera si su mensaje habia llegado.
-      progress('queued','Solicitud recibida por el bridge',{tool:'Task',action:'En cola'});log(`REQ ${req.id} -> ${String(req.prompt).slice(0,80)}`);const a=await processPrompt(String(req.prompt||''),progress);progress('complete','Respuesta completada',{tool:'Task',action:'Completado',detail:a.length+' caracteres'});result={ok:true,id:req.id,text:a};publishBusReply(req.agentLabel,a);log(`RES ${req.id} ok (${a.length} chars)`)
+      progress('queued','Solicitud recibida por el bridge',{tool:'Task',action:'En cola'});log(`REQ ${req.id} -> ${String(req.prompt).slice(0,80)}`);const a=await conLimite(processPrompt(String(req.prompt||''),progress),TOPE_PETICION,
+          'La petición se pasó de '+Math.round(TOPE_PETICION/60000)+' minutos y la corté. Vuelve a intentarlo; si se repite, mira el log del bridge.');progress('complete','Respuesta completada',{tool:'Task',action:'Completado',detail:a.length+' caracteres'});result={ok:true,id:req.id,text:a};publishBusReply(req.agentLabel,a);log(`RES ${req.id} ok (${a.length} chars)`)
       // Soltar el hilo usado: reutilizarlo hacía que el SIGUIENTE prompt se
       // escribiera en el composer pero no llegara a publicarse (la primera
       // pregunta siempre iba bien porque abría hilo nuevo, la segunda se colgaba).
@@ -3251,6 +3262,17 @@ async function handleBridgeRequest(workingPath,req){
 // esperar detras del prompt en curso (la cola serializada es solo para lo que
 // usa el navegador). Antes, abrir el terminal mientras Notion respondia dejaba
 // el arranque bloqueado minutos.
+// Red de seguridad: pase lo que pase (Notion colgado, un proceso que no
+// responde, una promesa que nunca resuelve), la peticion TERMINA. Sin esto el
+// panel se quedaba en "trabajando" indefinidamente y bloqueaba la cola.
+const TOPE_PETICION=6*60*1000
+function conLimite(promesa,ms,alternativa){
+  let t
+  return Promise.race([
+    Promise.resolve(promesa).finally(()=>clearTimeout(t)),
+    new Promise(r=>{ t=setTimeout(()=>r(alternativa),ms) }),
+  ])
+}
 const LIGHT_ACTIONS=new Set(['pool','accounts','select-account','next-account','rotation-plan','get-auto-rotate','set-auto-rotate','clear-selection','memory-show','memory-reset','memory-save','set-project','clear-project','set-workspace','get-workspace','model-list','model-current','set-model','clear-model','set-mode','get-mode','debug-raw'])
 function isLightRequest(req={}){
   const action=String(req.action||'').trim()
