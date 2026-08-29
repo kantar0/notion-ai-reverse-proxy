@@ -347,6 +347,45 @@ async function fijarUidActivo(client,uid,spaceId){
     return true
   }catch{ return false }
 }
+// Antes de un chat, deja activa la cuenta con más créditos y un workspace suyo
+// con IA activa, para no empezar en una cuenta agotada (y colgarse en recovery).
+async function preseleccionarCuentaConCredito(){
+  const emails=[...new Set(listConnectedAccounts().map(a=>a.email).filter(Boolean))]
+  let mejor=null
+  for(const email of emails){
+    const cuenta=listConnectedAccounts().find(a=>a.email===email)
+    const cr=await creditosDeCuenta(cuenta)
+    if(cr&&cr.disponibles>0&&(!mejor||cr.disponibles>mejor.disp)) mejor={cuenta,disp:cr.disponibles}
+  }
+  if(!mejor) return false
+  // Un spaceId FREE de esa cuenta (con IA), no el business.
+  try{
+    const ses=JSON.parse(fs.readFileSync(getAccountSessionFile(mejor.cuenta),'utf8'))
+    const tok=(ses.cookies||[]).find(c=>c.name==='token_v2')
+    const uid=mejor.cuenta.uid||''
+    const base={'content-type':'application/json','cookie':'token_v2='+tok.value,
+      'user-agent':'Mozilla/5.0 Chrome/126'}
+    if(uid) base['x-notion-active-user-header']=uid
+    const g=await fetch('https://www.notion.so/api/v3/getSpaces',{method:'POST',headers:base,body:'{}',signal:AbortSignal.timeout(10000)})
+    const gj=await g.json(); const u=Object.keys(gj)[0]; const spaces=gj[u]?.space||{}
+    // Probar spaces hasta uno que reporte créditos (free con IA), no not_applicable.
+    for(const sp of Object.keys(spaces).slice(0,6)){
+      const c=await fetch('https://www.notion.so/api/v3/getCreditRateLimitStatus',{method:'POST',headers:base,body:JSON.stringify({spaceId:sp}),signal:AbortSignal.timeout(6000)})
+      if(c.status!==200) continue
+      const cj=await c.json().catch(()=>null)
+      if(cj&&cj.status&&cj.status!=='not_applicable'){
+        const st=loadState()
+        saveState({selectedChatUrl:'https://app.notion.com/chat?spaceId='+sp,
+          selectedChatOwnerKey:mejor.cuenta.uid+'::'+sp,
+          lastSelectedAccount:{email:mejor.cuenta.email,uid:mejor.cuenta.uid,spaceId:sp,key:mejor.cuenta.uid+'::'+sp},
+          threadManuallySelected:false,version:VERSION})
+        log('[chat] preseleccionada '+mejor.cuenta.email+' ('+mejor.disp+' créditos) space '+sp.slice(0,8))
+        return true
+      }
+    }
+  }catch(e){ log('[chat] preselección falló: '+String(e&&e.message||e).slice(0,60)) }
+  return false
+}
 async function creditosDeCuenta(account={}){
   try{
     const ses=JSON.parse(fs.readFileSync(getAccountSessionFile(account),'utf8'))
@@ -1124,7 +1163,15 @@ function buildVisiblePrompt(userText) {
 // ofrecen herramientas. Con el prompt completo, un simple "hey" le hacia
 // responder con ordenes EJECUTAR que el CLI ignora pero que el panel muestra
 // como actividad, y parecia que el saludo disparaba comandos.
-function buildScopedPrompt(userText, reqId) {
+function buildScopedPrompt(userText, reqId, raw=false) {
+  // Modo chat puro (para el shim del proxy): sin el prefijo de control de PC ni
+  // el contexto de sesión. El prompt es tal cual, con solo el ancla del reqId
+  // para poder detectar la respuesta.
+  if(raw){
+    return String(userText)+String.fromCharCode(10,10)+
+      '[reqId:'+reqId+']'+String.fromCharCode(10)+
+      '=== FIN DE CONTEXTO. RESPONDE SOLO A LA SOLICITUD ANTERIOR ==='
+  }
   const state=loadState()
   const workspaceMemory=buildWorkspaceMemoryPack().trim().slice(0,8000)
   const memory=readLocalMemory().trim().slice(0,4000)
@@ -2632,7 +2679,7 @@ async function runThreadPrompt(cdp,promptText,progress=()=>{},label='worker real
   if(ultimo) return String(ultimo).replace(/[\s.·•…]+$/,'').trim()   // algo llegó: mejor eso que un timeout
   throw new Error('Timeout esperando respuesta del worker real')
 }
-async function executeHiddenPrompt(userText,progress=()=>{}){
+async function executeHiddenPrompt(userText,progress=()=>{},opts={}){
   // Cada petición estrena hilo. Reutilizar el anterior hacía que el prompt se
   // escribiera en el composer pero no llegara a publicarse: la primera pregunta
   // siempre funcionaba (abría hilo nuevo) y la segunda se quedaba colgada.
@@ -2653,7 +2700,9 @@ async function executeHiddenPrompt(userText,progress=()=>{}){
       if(abiertos) extraPc=String.fromCharCode(10)+'PROGRAMAS YA ABIERTOS EN EL PC: '+abiertos+
         String.fromCharCode(10)+'(si el programa ya está abierto NO lo vuelvas a lanzar: actúa sobre él)'
     }
-    const scopedPrompt=buildScopedPrompt(userText+extraPc,Math.random().toString(36).slice(2,10))
+    const scopedPrompt=opts.raw
+      ? buildScopedPrompt(userText,Math.random().toString(36).slice(2,10),true)
+      : buildScopedPrompt(userText+extraPc,Math.random().toString(36).slice(2,10))
     const a=sanitizeForTerminal(await runThreadPrompt(client,scopedPrompt,progress,'Prompt oculto'))
         // Con el puente no se usa el MCP de Notion: si la respuesta menciona fallos
     // de MCP es ruido suyo, no hay nada que reprovisionar.
@@ -2757,7 +2806,7 @@ function createSpaceWithQuota(progress=()=>{}){
   if(r.status===2){ log('[space-ensure] Notion no permite crear más workspaces ahora'); return false }
   return /workspace nuevo|cupo: DISPONIBLE/i.test(String(r.stdout||''))
 }
-async function runHiddenPromptWithRotation(userText,progress=()=>{}){
+async function runHiddenPromptWithRotation(userText,progress=()=>{},opts={}){
   const tried=new Set()
   let espacioCreado=false, reintentosHilo=0, reintentosMotor=0, reintentosSesion=0, reintentosContexto=0
   // El motor se cuelga a menudo tras muchas navegaciones (sigue respondiendo por
@@ -2783,7 +2832,7 @@ async function runHiddenPromptWithRotation(userText,progress=()=>{}){
   while(true){
     const currentKey=getSelectedAccountKey()
     if(currentKey) tried.add(currentKey)
-    try{return await executeHiddenPrompt(userText,progress)}
+    try{return await executeHiddenPrompt(userText,progress,opts)}
     catch(error){
       // Perder el hilo no es motivo para rendirse: Notion recarga el chat de vez
       // en cuando y la pregunta se queda sin publicar. Se reintenta entera, en
@@ -4022,6 +4071,27 @@ async function handleBridgeRequest(workingPath,req){
     else if(req.action==='thread-select'){const p=await selectThread(req.value);result={ok:true,id:req.id,text:`Thread seleccionado: ${p.title} | ${p.threadId||p.url}`,meta:p};log(`THREAD_SELECT ${req.id}`)}
     else if(req.action==='account'){const a=await getActiveAccount();result={ok:!a.error,id:req.id,text:'Cuenta: '+(a.email||a.userId||'sin detectar')+'\nNombre: '+(a.name||'Sin nombre visible')+'\nWorkspace: '+(a.workspace||'Workspace actual')+'\nChat: '+simplifyChatTitle(a.title||''),meta:a};log(`ACCOUNT ${req.id}`)}
     else if(req.action==='connect-account'){const a=await connectCurrentAccount();result={ok:true,id:req.id,text:'Conectado: '+formatAccountLabel(a)+'\nCorreo: '+(a.email||'No detectado todavía')+'\nWorkspace: '+(a.workspace||'Workspace actual')+'\nSesión guardada: '+(fs.existsSync(getAccountSessionFile(a))?'sí':'no'),meta:a};log(`CONNECT_ACCOUNT ${req.id}`)}
+    else if(req.action==='raw-chat'){
+      // Chat PURO para el shim del proxy: sin el prefijo de control de PC ni el
+      // bucle de herramientas. La IA de Notion responde como un LLM normal.
+      const prompt=String(req.prompt||req.value||'').trim()
+      if(!prompt){ result={ok:false,id:req.id,error:'prompt vacío'} }
+      else{
+        // Modelo por request (opcional): se fija temporalmente si viene.
+        let modeloPrevio=null
+        if(req.model){ const m=resolveModel(req.model); if(m){ const st=loadState(); modeloPrevio=st.activeModel; saveState({activeModel:m.id,version:VERSION}) } }
+        try{
+          await preseleccionarCuentaConCredito().catch(()=>{})
+          const texto=await runHiddenPromptWithRotation(prompt,()=>{},{raw:true})
+          result={ok:true,id:req.id,text:String(texto||'').trim()}
+        }catch(e){
+          result={ok:false,id:req.id,error:String(e&&e.message||e).slice(0,300)}
+        }finally{
+          if(modeloPrevio!==null){ saveState({activeModel:modeloPrevio,version:VERSION}) }
+        }
+        log('RAW_CHAT '+req.id+' ('+(result.ok?'ok '+(result.text||'').length+'c':'err')+')')
+      }
+    }
     else if(req.action==='panel-accounts'){
       // JSON estructurado para el panel: cada cuenta con su cupo REAL de créditos.
       const emails=[...new Set(listConnectedAccounts().map(a=>a.email).filter(Boolean))]
@@ -4277,7 +4347,7 @@ function conLimite(promesa,ms,alternativa){
     new Promise(r=>{ t=setTimeout(()=>r(alternativa),ms) }),
   ])
 }
-const LIGHT_ACTIONS=new Set(['pool','accounts','select-account','next-account','rotation-plan','get-auto-rotate','set-auto-rotate','clear-selection','memory-show','memory-reset','memory-save','set-project','clear-project','set-workspace','get-workspace','model-list','model-current','set-model','clear-model','set-mode','get-mode','debug-raw'])
+const LIGHT_ACTIONS=new Set(['pool','panel-accounts','session-accounts','health','accounts','select-account','next-account','rotation-plan','get-auto-rotate','set-auto-rotate','clear-selection','memory-show','memory-reset','memory-save','set-project','clear-project','set-workspace','get-workspace','model-list','model-current','set-model','clear-model','set-mode','get-mode','debug-raw'])
 function isLightRequest(req={}){
   const action=String(req.action||'').trim()
   if(action==='status') return req.fast===true
