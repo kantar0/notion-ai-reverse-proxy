@@ -33,7 +33,7 @@ const VERSION = '13.2'
 const MCP_REGISTRY_FILE = path.join(DIR, 'mcp-workspace-registry.json')
 const MCP_REGISTRY_SYNC_SCRIPT = path.join(DIR, 'mcp-registry-sync.mjs')
 const MCP_REGISTRY_TTL_MS = 60_000
-const CANONICAL_MCP_ORIGIN = (process.env.MCP_ORIGIN || 'https://TU-SERVIDOR-MCP.example.com')   // URL de TU servidor MCP (mcp-server.json / MCP_ORIGIN)
+const CANONICAL_MCP_ORIGIN = (process.env.MCP_ORIGIN || 'https://TU-SERVIDOR-MCP.example.com')
 const MCP_ENSURE_SCRIPT = path.join(DIR, 'ensure-mcp-connection.mjs')
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const DEFAULT_MODE = 'hidden'
@@ -350,49 +350,22 @@ async function fijarUidActivo(client,uid,spaceId){
 // Antes de un chat, deja activa la cuenta con más créditos y un workspace suyo
 // con IA activa, para no empezar en una cuenta agotada (y colgarse en recovery).
 async function preseleccionarCuentaConCredito(){
-  const emails=[...new Set(listConnectedAccounts().map(a=>a.email).filter(Boolean))]
-  let mejor=null
-  for(const email of emails){
-    const cuenta=listConnectedAccounts().find(a=>a.email===email)
-    const cr=await creditosDeCuenta(cuenta)
-    if(cr&&cr.disponibles>0&&(!mejor||cr.disponibles>mejor.disp)) mejor={cuenta,disp:cr.disponibles}
-  }
-  if(!mejor) return false
-  // Un spaceId FREE de esa cuenta (con IA), no el business.
-  try{
-    const ses=JSON.parse(fs.readFileSync(getAccountSessionFile(mejor.cuenta),'utf8'))
-    const tok=(ses.cookies||[]).find(c=>c.name==='token_v2')
-    const uid=mejor.cuenta.uid||''
-    const base={'content-type':'application/json','cookie':'token_v2='+tok.value,
-      'user-agent':'Mozilla/5.0 Chrome/126'}
-    if(uid) base['x-notion-active-user-header']=uid
-    const g=await fetch('https://www.notion.so/api/v3/getSpaces',{method:'POST',headers:base,body:'{}',signal:AbortSignal.timeout(10000)})
-    const gj=await g.json(); const u=Object.keys(gj)[0]; const spaces=gj[u]?.space||{}
-    // Elegir un space FREE (no business: el business tiene la IA desactivada y no
-    // monta composer). getPublicSpaceData da el subscriptionTier.
-    for(const sp of Object.keys(spaces).slice(0,10)){
-      // ¿Es business/team? -> saltar (no hay composer ahí).
-      let tier=''
-      try{
-        const pd=await fetch('https://www.notion.so/api/v3/getPublicSpaceData',{method:'POST',headers:base,body:JSON.stringify({type:'space-ids',spaceIds:[sp]}),signal:AbortSignal.timeout(6000)})
-        if(pd.status===200){ const pj=await pd.json(); tier=String(pj.results?.[0]?.subscriptionTier||'') }
-      }catch{}
-      if(/business|enterprise|team/i.test(tier)) continue
-      const c=await fetch('https://www.notion.so/api/v3/getCreditRateLimitStatus',{method:'POST',headers:base,body:JSON.stringify({spaceId:sp}),signal:AbortSignal.timeout(6000)})
-      if(c.status!==200) continue
-      const cj=await c.json().catch(()=>null)
-      if(cj&&cj.status&&cj.status!=='not_applicable'){
-        const st=loadState()
-        saveState({selectedChatUrl:'https://app.notion.com/chat?spaceId='+sp,
-          selectedChatOwnerKey:mejor.cuenta.uid+'::'+sp,
-          lastSelectedAccount:{email:mejor.cuenta.email,uid:mejor.cuenta.uid,spaceId:sp,key:mejor.cuenta.uid+'::'+sp},
-          threadManuallySelected:false,version:VERSION})
-        log('[chat] preseleccionada '+mejor.cuenta.email+' ('+mejor.disp+' créditos) space '+sp.slice(0,8))
-        return true
-      }
-    }
-  }catch(e){ log('[chat] preselección falló: '+String(e&&e.message||e).slice(0,60)) }
-  return false
+  // El cupo de chat REAL son las requests del plan Free (20 por workspace),
+  // medidas por el composer (botón de enviar habilitado), NO los créditos
+  // basic_ai_credits (que son del business trial con la IA desactivada, inútiles
+  // para chatear). El pool guarda en conCupoIds los workspaces con composer.
+  const st=loadState()
+  const conCupo=(st.conCupoIds||[])
+  if(!conCupo.length) return false   // ningún workspace con requests: nada que preseleccionar
+  const sp=conCupo[0]
+  const dueno=listConnectedAccounts().find(a=>a.spaceId===sp)
+  if(!dueno) return false
+  saveState({selectedChatUrl:'https://app.notion.com/chat?spaceId='+sp,
+    selectedChatOwnerKey:dueno.uid+'::'+sp,
+    lastSelectedAccount:{email:dueno.email,uid:dueno.uid,spaceId:sp,key:dueno.uid+'::'+sp},
+    threadManuallySelected:false,version:VERSION})
+  log('[chat] preseleccionado workspace con requests de chat: '+sp.slice(0,8)+' ('+dueno.email+')')
+  return true
 }
 async function creditosDeCuenta(account={}){
   try{
@@ -1263,7 +1236,7 @@ function buildCanonicalChatUrl(urlText){
 }
 function normalizeTitleText(t){return String(t||'').replace(/\s+/g,' ').replace(/\b(Now|\d+h|Yesterday|Today)\b/g,'').trim()}
 async function discoverAllThreads(){
-  var ZEN_PROF=process.env.ZEN_PROFILE||'';   // perfil de Zen Browser (opcional): ver README
+  var ZEN_PROF=process.env.ZEN_PROFILE||'';
   var SFS=[
     ZEN_PROF+'/sessionstore-backups/recovery.jsonlz4',
     ZEN_PROF+'/zen-sessions.jsonlz4',
@@ -4210,20 +4183,18 @@ async function handleBridgeRequest(workingPath,req){
       const bloq=Object.entries(st.spaceCreateBlockedBy||{}).filter(([,t])=>t>Date.now()).map(([e])=>e)
       const lineas=[ps?('Ultima medicion: '+ps.conCupo+'/'+ps.minimo+' workspaces con cupo · '+ps.creados+' creado(s) · '+new Date(ps.at).toLocaleString()):'Sin mediciones todavia']
       if(bloq.length) lineas.push('Cuentas cortadas por ritmo de Notion: '+bloq.join(', '))
-      // Créditos REALES por cuenta (el cupo de verdad: per-user, no per-workspace).
-      const emailsCred=[...new Set(listConnectedAccounts().map(a=>a.email).filter(Boolean))]
-      lineas.push('Créditos de IA por cuenta (100 por período, ~27 días):')
-      let totalDisp=0, algunaMedida=false
-      for(const email of emailsCred){
-        const cuenta=listConnectedAccounts().find(a=>a.email===email)
-        const cr=await creditosDeCuenta(cuenta)
-        if(cr){
-          algunaMedida=true; totalDisp+=cr.disponibles
-          const dias=cr.resetMs?Math.max(0,Math.round((cr.resetMs-Date.now())/86400000)):null
-          lineas.push('  '+(cr.disponibles>0?'✓':'✗')+' '+email+': '+cr.disponibles.toFixed(0)+' créditos libres ('+cr.usados.toFixed(1)+'/'+cr.limite+')'+(dias!=null?', reset en '+dias+'d':''))
-        }else lineas.push('  · '+email+': no pude leer créditos (sesión?)')
+      // Cupo de CHAT real = requests del plan Free (workspaces con composer),
+      // NO los créditos basic_ai_credits (business trial, IA off = inútiles).
+      const conCupoIds=(st.conCupoIds||[])
+      lineas.push('Workspaces con requests de chat (plan Free, ~20 por workspace):')
+      if(conCupoIds.length){
+        const porCuenta={}
+        for(const sp of conCupoIds){ const a=listConnectedAccounts().find(x=>x.spaceId===sp); const e=a?a.email:'?'; porCuenta[e]=(porCuenta[e]||0)+1 }
+        for(const [e,n] of Object.entries(porCuenta)) lineas.push('  ✓ '+e+': '+n+' workspace(s) con chat disponible')
+        lineas.push('TOTAL: '+conCupoIds.length+' workspaces con requests de chat.')
+      }else{
+        lineas.push('  ✗ Ningún workspace con requests de chat ahora. Cada workspace Free nuevo trae ~20; crea uno o conecta una cuenta con workspaces frescos.')
       }
-      if(algunaMedida) lineas.push('TOTAL disponible ahora: ~'+totalDisp.toFixed(0)+' créditos. OJO: crear workspaces NO da más — el cupo es por CUENTA. Para más: otra cuenta o esperar el reset.')
       // Consumo local medido (peticiones servidas).
       const c=st.consumo||{}
       const conCupo=(st.conCupoIds||[]).length
